@@ -11,19 +11,42 @@ This is the Copilot-native counterpart to the `js-recon` skill in
 
 ## Install
 
-```bash
-./copilot-vapt/install.sh /path/to/engagement-workspace --verify
+**Windows** (PowerShell or cmd — no WSL needed):
+
+```
+python copilot-vapt\install.py C:\engagements\acme-webapp --verify
 ```
 
-That installs both halves, which have to travel together:
+**macOS / Linux:**
+
+```bash
+python3 copilot-vapt/install.py ~/engagements/acme-webapp --verify
+```
+
+There is also `install.sh` for shell users; `install.py` is the cross-platform
+one and is the recommended path everywhere. It copies from this repository — it
+does not download anything.
+
+Python 3 is required either way, since the analysis scripts are Python. If
+`python` is not recognised on Windows, install it from python.org or the
+Microsoft Store and tick "Add to PATH".
+
+Both installers place two directories in your workspace, which have to travel
+together:
 
 - `.github/` — the instructions, chat mode and prompt files
 - `scripts/` — the tested `js-recon` analysis scripts the prompts call
 
 Then open that folder in VS Code and pick the **VAPT Recon** chat mode.
 
-`--verify` runs the smoke test so you know the scripts work before you start.
-`--force` skips the overwrite prompts.
+`--verify` runs the full pipeline over test fixtures and reports 15 checks, so
+you know the scripts work before you start — this matters more than it sounds,
+because the failures that bite (a parser silently returning nothing, a filter
+letting placeholders through) look fine to a syntax check. `--force` skips the
+overwrite prompts.
+
+The repository's `tests/smoke_test.sh` is bash and will not run on Windows;
+`install.py --verify` is the cross-platform equivalent.
 
 **Install both or neither.** If the prompts arrive without `scripts/`, Copilot
 has nothing to call and rewrites each analysis from scratch — untested, and
