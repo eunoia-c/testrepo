@@ -32,8 +32,25 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 SRC_GITHUB = os.path.join(HERE, ".github")
-SRC_SCRIPTS = os.path.join(REPO, ".claude", "skills", "js-recon", "scripts")
-SRC_FIXTURES = os.path.join(REPO, ".claude", "skills", "js-recon", "tests", "fixtures")
+
+
+def _first_dir(*candidates):
+    """Prefer the copy inside this folder so that downloading copilot-vapt on
+    its own is enough; fall back to the skill in a full checkout."""
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+SRC_SCRIPTS = _first_dir(
+    os.path.join(HERE, "scripts"),
+    os.path.join(REPO, ".claude", "skills", "js-recon", "scripts"),
+)
+SRC_FIXTURES = _first_dir(
+    os.path.join(HERE, "tests", "fixtures"),
+    os.path.join(REPO, ".claude", "skills", "js-recon", "tests", "fixtures"),
+)
 
 
 def fail(msg, *extra):
@@ -194,9 +211,9 @@ def main():
     if not os.path.isdir(SRC_GITHUB):
         fail("Cannot find %s" % SRC_GITHUB, "Run this from a full checkout of the repository.")
     if not os.path.isdir(SRC_SCRIPTS):
-        fail("Cannot find the js-recon scripts at:", SRC_SCRIPTS,
-             "Run this from a full checkout -- the installer copies the scripts",
-             "from the skill rather than keeping a second copy.")
+        fail("Cannot find the analysis scripts at:", SRC_SCRIPTS,
+             "Expected them in copilot-vapt/scripts/. If you downloaded only part",
+             "of the folder, download it again including the scripts directory.")
 
     target = os.path.abspath(os.path.expanduser(args.workspace))
     if not os.path.isdir(target):
@@ -217,6 +234,8 @@ def main():
     print("  .github/instructions/  1 scoped instruction file")
     print("  .github/prompts/       %d slash commands" % n_prompts)
     print("  scripts/               %d analysis scripts" % n_scripts)
+    print("     (from %s)" % os.path.relpath(SRC_SCRIPTS, os.path.dirname(REPO))
+          if SRC_SCRIPTS.startswith(REPO) else "")
 
     if args.verify:
         print("\nVerifying the pipeline runs correctly...")

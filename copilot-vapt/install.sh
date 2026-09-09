@@ -15,7 +15,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
-SRC_SCRIPTS="$REPO/.claude/skills/js-recon/scripts"
+# Prefer the copy inside this folder so downloading copilot-vapt alone works;
+# fall back to the skill when running from a full checkout.
+if [ -d "$HERE/scripts" ]; then
+  SRC_SCRIPTS="$HERE/scripts"
+else
+  SRC_SCRIPTS="$REPO/.claude/skills/js-recon/scripts"
+fi
 
 usage() {
   cat <<USAGE
@@ -54,10 +60,10 @@ fi
 TARGET="$(cd "$TARGET" && pwd)"
 
 if [ ! -d "$SRC_SCRIPTS" ]; then
-  echo "Cannot find the js-recon scripts at:" >&2
+  echo "Cannot find the analysis scripts at:" >&2
   echo "  $SRC_SCRIPTS" >&2
-  echo "Run this from a full checkout of the repository -- the installer copies" >&2
-  echo "the scripts from the skill rather than keeping a second copy." >&2
+  echo "Expected them in copilot-vapt/scripts/. If you downloaded only part of" >&2
+  echo "the folder, download it again including the scripts directory." >&2
   exit 1
 fi
 
@@ -92,7 +98,9 @@ echo "  scripts/              $(ls -1 "$TARGET/scripts"/*.py | wc -l | tr -d ' '
 if [ "$VERIFY" -eq 1 ]; then
   echo
   echo "Verifying the scripts run correctly..."
-  if [ -f "$REPO/.claude/skills/js-recon/tests/smoke_test.sh" ]; then
+  if [ -f "$HERE/install.py" ]; then
+    python3 "$HERE/install.py" "$TARGET" --force --verify | sed -n '/Verifying/,/checks passed/p'
+  elif [ -f "$REPO/.claude/skills/js-recon/tests/smoke_test.sh" ]; then
     bash "$REPO/.claude/skills/js-recon/tests/smoke_test.sh" | tail -3
   else
     echo "  Smoke test not found; running a syntax check instead."

@@ -7,6 +7,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL="$(dirname "$HERE")"
+REPO_ROOT="$(cd "$SKILL/../../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -29,6 +30,20 @@ check() {  # check <description> <actual> <expected>
     fail=1
   fi
 }
+
+echo "== copilot-vapt script sync =="
+SYNC="$REPO_ROOT/copilot-vapt/sync_scripts.py"
+if [ -f "$SYNC" ]; then
+  if python3 "$SYNC" --check >/dev/null 2>&1; then
+    printf '  ok   copilot-vapt/scripts matches the skill\n'
+  else
+    printf '  FAIL copilot-vapt/scripts has drifted from the skill\n'
+    python3 "$SYNC" --check 2>&1 | sed 's/^/       /'
+    fail=1
+  fi
+else
+  printf '  --   copilot-vapt not present, skipping sync check\n'
+fi
 
 echo "== parse_burp =="
 python3 "$SKILL/scripts/parse_burp.py" "$FIX/burp_export.xml" \

@@ -9,6 +9,21 @@ This is the Copilot-native counterpart to the `js-recon` skill in
 `.claude/skills/`. Same methodology, different delivery — see
 [Differences from the Claude Code skill](#differences-from-the-claude-code-skill).
 
+This folder is **self-contained**. It carries its own copy of the analysis
+scripts, so downloading `copilot-vapt/` alone is enough — no clone, no pull.
+
+## Getting it without git
+
+GitHub has no per-folder download, so grab the repository ZIP and keep this
+folder:
+
+```
+https://github.com/eunoia-c/testrepo/archive/refs/heads/claude/pegasystems-cve-research-q1cwjq.zip
+```
+
+Extract it, and everything you need is under `copilot-vapt/`. The rest of the
+repository can be deleted.
+
 ## Install
 
 **Windows** (PowerShell or cmd — no WSL needed):
@@ -53,9 +68,33 @@ has nothing to call and rewrites each analysis from scratch — untested, and
 differently every run. That is the single most likely way this package
 underperforms, and it looks like it is working while it happens.
 
-The installer copies the scripts from `.claude/skills/js-recon/scripts/` rather
-than keeping a second copy in this directory, so there is one source of truth
-and the two packages cannot drift apart.
+### Or just copy the folders yourself
+
+The installer only copies files. In File Explorer:
+
+1. `copilot-vapt\.github`  →  paste into your workspace
+2. `copilot-vapt\scripts`  →  paste into your workspace
+
+Identical result. `.github` starts with a dot, so turn on **View → Hidden
+items** if you cannot see it after pasting. You can still verify afterwards:
+
+```
+python copilot-vapt\install.py C:\engagements\acme --force --verify
+```
+
+### A note on the duplicated scripts
+
+`copilot-vapt/scripts/` is a copy of `.claude/skills/js-recon/scripts/`. The
+duplication is deliberate — it is what makes this folder downloadable on its
+own — but duplication drifts, so `sync_scripts.py` guards it:
+
+```bash
+python copilot-vapt/sync_scripts.py --check   # report drift, non-zero if any
+python copilot-vapt/sync_scripts.py           # copy skill -> copilot-vapt
+```
+
+The skill is the source of truth, and the skill's `tests/smoke_test.sh` runs the
+`--check` so a divergence fails the suite rather than going unnoticed.
 
 If prompt files are not picked up, check that they are enabled in settings
 (`chat.promptFiles`) — availability and the exact setting key have moved between
