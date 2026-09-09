@@ -1,6 +1,6 @@
 ---
 name: js-recon
-description: Static analysis copilot for web VAPT — mines JavaScript, .axd resources, bundles and Burp exports for HTTP endpoints, builds fuzzing wordlists, generates Burp Repeater-ready raw HTTP requests (never curl), flags endpoints with no authorization evidence, and finds DOM XSS source-to-sink paths, then writes it all up as a Markdown findings report. Use this whenever someone is doing a web application penetration test, security assessment, bug bounty or code review and mentions JavaScript files, JS bundles, .axd / ScriptResource.axd / WebResource.axd, minified scripts, a Burp sitemap or proxy export, endpoint discovery or enumeration, hidden or undocumented API routes, building a wordlist for ffuf/feroxbuster/dirsearch, testing for missing authorization or broken access control, IDOR hunting, DOM XSS or dangerous sinks like innerHTML and eval, or asks for a request they can paste into Repeater. Also use it when they simply hand over a folder of .js files and ask what is interesting in there, or ask to "look at this bundle", even if they never say the words static analysis.
+description: Static analysis copilot for web VAPT — mines JavaScript, .axd resources, bundles and Burp exports for HTTP endpoints, hardcoded secrets and API keys, and interesting parameters; builds fuzzing wordlists; generates Burp Repeater-ready raw HTTP requests (never curl); flags endpoints with no authorization evidence; finds DOM XSS source-to-sink paths; ranks the attack surface with concrete suggested tests per endpoint and parameter; and writes it all up as a Markdown findings report. Use this whenever someone is doing a web application penetration test, security assessment, bug bounty or code review and mentions JavaScript files, JS bundles, .axd / ScriptResource.axd / WebResource.axd, minified scripts, a Burp sitemap or proxy export, endpoint discovery or enumeration, hidden or undocumented API routes, building a wordlist for ffuf/feroxbuster/dirsearch, hardcoded credentials, leaked API keys or tokens in frontend code, JWTs, source maps, interesting or dangerous parameters, what to attack or where to start on a target, testing for missing authorization or broken access control, IDOR, SSRF, mass assignment, DOM XSS or dangerous sinks like innerHTML and eval, or asks for a request they can paste into Repeater. Also use it when they simply hand over a folder of .js files and ask what is interesting in there, or ask to "look at this bundle", even if they never say the words static analysis.
 ---
 
 # JS Recon — static analysis copilot for web VAPT
@@ -32,11 +32,13 @@ Burp export ──> parse_burp.py ──> burp_js/ + burp_index.json
                                         │
 saved .js/.axd files ───────────────────┴──> extract_endpoints.py ──> endpoints.json
                                                                           │
-                                    ┌─────────────────────────────────────┤
-                                    ▼                     ▼               ▼
-                            gen_wordlist.py       make_request.py    gen_report.py
-                                                                          ▲
-JS/HTML files ──────────> dom_xss_scan.py ──> domxss.json ────────────────┘
+                        ┌──────────────────┬──────────────────┬───────────┤
+                        ▼                  ▼                  ▼           │
+                gen_wordlist.py     make_request.py    suggest_attacks.py  │
+                                                               │          │
+JS/HTML files ──> dom_xss_scan.py ──> domxss.json ─────────────┼──────────┤
+                                                               │          ▼
+JS/config files ─> find_secrets.py ──> secrets.json ───────────┴──> gen_report.py
 ```
 
 All scripts are stdlib-only Python 3 and take `--help`.
@@ -134,17 +136,86 @@ Regex cannot do interprocedural taint analysis. Treat every hit as a lead to
 confirm in a browser — `references/dom-xss.md` covers how to do that and which
 sinks mislead.
 
-### 6. The report
+### 6. Secrets and API keys
+
+```bash
+python3 scripts/find_secrets.py ./js ./burp_js --out secrets.json
+python3 scripts/find_secrets.py ./js --out secrets.json --redact   # for shared reports
+```
+
+Tiered by what the pattern itself proves — `confirmed` is a provider-specific
+format that cannot plausibly be anything else (`AKIA…`, `ghp_…`, `sk_live_…`, a
+PEM block), `probable` is a credential-shaped assignment whose value passes an
+entropy check and is not a placeholder, `possible` is weaker, `info` covers
+disclosures that are not credentials.
+
+The tiering exists because secret scanners fail by crying wolf: a report with
+300 hits, nearly all placeholders and minified identifiers, gets skimmed and
+binned. Placeholders (`YOUR_API_KEY_HERE`, `${process.env.KEY}`, `changeme`) and
+low-entropy noise are filtered out by design.
+
+Worth knowing about the `info` tier (shown with `--min-tier info`):
+
+- **JWTs are decoded** — header and payload, no signature verification. The
+  claims usually matter more than the token: `alg=none`, an HMAC algorithm
+  inviting key-confusion testing, expiry, and any role or scope claim.
+- **Source map references** — if the `.map` is actually served, it reconstructs
+  original sources with comments and real names. Fetch it and re-run the
+  extractor over the result; it is the single biggest coverage win available.
+- **Internal hostnames and private IPs** — targets for the SSRF testing that
+  `suggest_attacks.py` proposes.
+
+Use `--redact` whenever output will reach anyone who should not hold live
+credentials. And if a confirmed credential turns out to be live, that is not a
+routine report row — tell the client when you find it.
+
+### 7. Interesting parameters and suggested attacks
+
+```bash
+python3 scripts/suggest_attacks.py endpoints.json --secrets secrets.json --out attacks.json
+```
+
+Ranks endpoints by testing value and proposes concrete tests. Three signal
+sources: parameter names matched against attack classes (IDOR, SSRF, traversal,
+SQLi, mass assignment, SSTI, JSONP, debug flags, business-logic values, and
+more), path segments (`admin`, `debug`, `swagger`, `graphql`, auth flows,
+export), and request shape (destructive methods, WebSocket handshakes, ASMX
+proxies, path-embedded object references).
+
+Each suggestion carries *why the name warrants the test* and *how to run it*, so
+the output is a working queue rather than a checklist of attack names.
+
+Two design points worth preserving if you edit the catalog:
+
+- **The score orders a queue; it is not a severity.** Say so when presenting
+  results. It reflects how much a name and shape justify a look, nothing more.
+- **`legacy-version` only fires when the inventory actually contains more than
+  one API version.** Flagging every `/v1/` path is noise; flagging a `/v1/` that
+  sits beside a `/v2/` is a real lead, because the older route keeps the
+  authorization model it shipped with.
+
+Depth for each class lives in `references/attack-playbook.md`. The one habit
+that matters most is in there too: **confirm a parameter reaches server-side
+behaviour before spending payloads on it.** Change it to something benign and
+different, and look for any response change at all. Client bundles are full of
+dead parameters.
+
+### 8. The report
 
 ```bash
 python3 scripts/gen_report.py --endpoints endpoints.json --domxss domxss.json \
-    --burp-index burp_index.json --target "Client name — app" --out report.md
+    --secrets secrets.json --attacks attacks.json --burp-index burp_index.json \
+    --target "Client name — app" --out report.md
 ```
 
-Produces a Markdown report: summary, authorization candidates cross-referenced
-against observed Burp traffic, DOM XSS candidates, ASP.NET-specific surface,
-full inventory, and an explicit limitations section. Every row carries a
-`file:line`.
+Produces a Markdown report: summary, credentials and disclosures, authorization
+candidates cross-referenced against observed Burp traffic, the prioritised
+attack surface with per-endpoint suggested tests, parameters worth attacking,
+DOM XSS candidates, ASP.NET-specific surface, full inventory, and an explicit
+limitations section. Every row carries a `file:line`.
+
+Optional inputs can be omitted and sections renumber themselves. Credentials
+come first because a live key outranks everything else in the document.
 
 ## Working with the output
 
@@ -173,6 +244,15 @@ individually. That shapes how broadly to test.
 are session theft, and worth stating explicitly in the report rather than
 leaving as two separate rows.
 
+**Cross-referencing the separate outputs.** The individual artifacts are less
+than their combination, and connecting them is judgement the scripts cannot do:
+an internal hostname from the secrets scan is the target for an SSRF candidate
+from the attack ranking; a source map means re-running everything over recovered
+sources; a JWT with `alg=none` beside an endpoint showing `no_auth_indicator` is
+a specific, testable chain rather than two unrelated rows. Say these out loud
+when summarising — it is the main thing a person gets from you over reading the
+JSON.
+
 ## Framework specifics
 
 - **ASP.NET / WebForms / `.axd`** — read `references/aspnet.md`. Covers
@@ -181,6 +261,8 @@ leaving as two separate rows.
 - **DOM XSS sinks and confirmation** — read `references/dom-xss.md`.
 - **Raw request construction and Repeater workflow** — read
   `references/burp-requests.md`.
+- **Parameter classes, path signals and how to test each** — read
+  `references/attack-playbook.md`.
 
 Read a reference when the target actually involves it; they are detail, not
 prerequisites.

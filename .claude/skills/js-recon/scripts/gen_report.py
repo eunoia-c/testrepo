@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--endpoints", required=True)
     ap.add_argument("--domxss", default=None)
     ap.add_argument("--burp-index", default=None)
+    ap.add_argument("--secrets", default=None, help="secrets.json from find_secrets.py")
+    ap.add_argument("--attacks", default=None, help="attacks.json from suggest_attacks.py")
     ap.add_argument("--out", default="js-recon-report.md")
     ap.add_argument("--target", default="the application under test",
                     help="Target name/scope as it should read in the report")
@@ -66,7 +68,18 @@ def main():
     inv = load(args.endpoints, required=True)
     dom = load(args.domxss)
     burp = load(args.burp_index)
+    sec = load(args.secrets)
+    atk = load(args.attacks)
     obs = burp_lookup(burp)
+
+    # Sections are numbered as they are emitted so that optional inputs can be
+    # absent without leaving gaps in the numbering.
+    counter = {"n": 0}
+
+    def section(title):
+        counter["n"] += 1
+        L.append("## %d. %s" % (counter["n"], title))
+        L.append("")
 
     eps = inv.get("endpoints", [])
     globals_ = inv.get("global_auth_mechanisms", [])
@@ -99,6 +112,12 @@ def main():
             bc.get("high", 0),
             bc.get("medium", 0) + bc.get("needs-review-sanitizer-present", 0),
             bc.get("low", 0)))
+    if sec:
+        st = sec.get("by_tier", {})
+        L.append("| Credentials recovered (confirmed / probable) | %d / %d |" % (
+            st.get("confirmed", 0), st.get("probable", 0)))
+    if atk:
+        L.append("| Parameters matching an attack class | %d |" % len(atk.get("interesting_parameters", [])))
     if burp:
         L.append("| Requests observed in Burp export | %d |" % burp.get("item_count", 0))
     L.append("| `.axd` resource references | %d |" % len(inv.get("axd_references", [])))
@@ -115,9 +134,51 @@ def main():
              "against the running application.")
     L.append("")
 
+    # --- Credentials -----------------------------------------------------
+    if sec and sec.get("findings"):
+        section("Credentials and sensitive disclosures")
+        tiers = sec.get("by_tier", {})
+        if tiers.get("confirmed") or tiers.get("probable"):
+            L.append("Client-side code is downloaded by everyone who can reach the "
+                     "application, so anything embedded in it should be treated as public. "
+                     "Findings are tiered by what the pattern itself proves: **confirmed** "
+                     "is a provider-specific format that cannot plausibly be anything else, "
+                     "**probable** is a credential-shaped value that passes an entropy check "
+                     "and is not a placeholder.")
+            L.append("")
+            L.append("| Tier | Type | Value | Location |")
+            L.append("| --- | --- | --- | --- |")
+            for f in sec["findings"]:
+                if f["tier"] in ("confirmed", "probable"):
+                    L.append("| %s | `%s` | `%s` | `%s:%s` |" % (
+                        f["tier"], f["kind"], esc(f["value"]), f["file"], f["line"]))
+            L.append("")
+            L.append("**Before reporting, establish whether each credential is live and what "
+                     "it grants.** A revoked or scope-limited key is a hygiene finding; a "
+                     "working one with production access is an incident, and the client "
+                     "should hear about it immediately rather than at report delivery.")
+            if not sec.get("redacted"):
+                L.append("")
+                L.append("> Values above are unredacted. Re-run `find_secrets.py --redact` "
+                         "before circulating this report if it will reach anyone who should "
+                         "not hold live credentials.")
+            L.append("")
+
+        info = [f for f in sec["findings"] if f["tier"] == "info"]
+        if info:
+            L.append("### Informational disclosures")
+            L.append("")
+            L.append("| Type | Detail | Location |")
+            L.append("| --- | --- | --- |")
+            for f in info:
+                detail = esc(f["value"])[:90]
+                if f.get("jwt", {}).get("notes"):
+                    detail += " — " + esc("; ".join(f["jwt"]["notes"][:3]))
+                L.append("| `%s` | %s | `%s:%s` |" % (f["kind"], detail, f["file"], f["line"]))
+            L.append("")
+
     # --- Authorization candidates ---------------------------------------
-    L.append("## 1. Endpoints to test for missing authorization")
-    L.append("")
+    section("Endpoints to test for missing authorization")
     if not candidates:
         L.append("_No endpoints were flagged. Every recovered call site showed authorization "
                  "evidence or inherited a bundle-wide mechanism._")
@@ -173,9 +234,68 @@ def main():
                      "explicitly if a cross-site scripting issue is also confirmed.")
             L.append("")
 
+    # --- Prioritised attack surface --------------------------------------
+    if atk:
+        ranked = [r for r in atk.get("endpoints", []) if r.get("score", 0) > 0]
+        if ranked:
+            section("Prioritised attack surface")
+            L.append("Endpoints ranked by the testing value of their path, method, "
+                     "authorization signal and parameter names. The score orders a queue; "
+                     "it is not a severity. Every entry is a hypothesis drawn from naming "
+                     "and shape — a parameter called `redirect_url` earns an SSRF test, it "
+                     "does not constitute one.")
+            L.append("")
+            L.append("| Score | ID | Method | Path | Signals |")
+            L.append("| --- | --- | --- | --- | --- |")
+            for r in ranked[:25]:
+                L.append("| %d | %s | %s | `%s` | %s |" % (
+                    r["score"], r["id"], r["method"], esc(r["path"]),
+                    esc(", ".join(r["signals"])) or "—"))
+            L.append("")
+
+            L.append("### Suggested tests for the highest-ranked endpoints")
+            L.append("")
+            for r in ranked[:8]:
+                L.append("#### `%s %s` — %s" % (r["method"], r["path"], r["id"]))
+                L.append("")
+                for t in r["suggested_tests"][:6]:
+                    label = t["attack"]
+                    if t.get("parameter"):
+                        label += " — `%s`" % t["parameter"]
+                    L.append("- **%s**  " % label)
+                    L.append("  %s  " % t["why"])
+                    L.append("  _Test:_ %s" % t["how"])
+                L.append("")
+                L.append("  Repeater pair: `%s`" % r["repeater"])
+                L.append("")
+
+        params = atk.get("interesting_parameters", [])
+        if params:
+            section("Parameters worth attacking")
+            L.append("Parameter names recovered from the client, matched against attack "
+                     "classes. Names are circumstantial — confirm each parameter is actually "
+                     "read by the server before drawing conclusions from what it is called.")
+            L.append("")
+            L.append("| Parameter | Attack classes | Seen on |")
+            L.append("| --- | --- | --- |")
+            for r in params[:30]:
+                L.append("| `%s` | %s | %s |" % (
+                    esc(r["name"]), esc(", ".join(c["class"] for c in r["classes"])),
+                    ", ".join(r["endpoints"][:6]) + (" …" if len(r["endpoints"]) > 6 else "")))
+            L.append("")
+            L.append("Test guidance per class is in `references/attack-playbook.md`; the "
+                     "per-endpoint suggestions above already inline the relevant parts.")
+            L.append("")
+            other = atk.get("uncategorised_parameters", [])
+            if other:
+                L.append("%d further parameter(s) matched no class: %s. Worth a glance — an "
+                         "application-specific name can be more interesting than a generic "
+                         "one, and the classifier only knows common conventions." % (
+                             len(other), ", ".join("`%s`" % o for o in other[:20])))
+                L.append("")
+
     # --- DOM XSS ---------------------------------------------------------
-    L.append("## 2. DOM-based XSS candidates")
-    L.append("")
+    section("DOM-based XSS candidates")
     if not dom or not dom.get("findings"):
         L.append("_No sink/source pairs were identified._")
     else:
@@ -207,8 +327,7 @@ def main():
     axd = inv.get("axd_references", [])
     pbs = inv.get("postback_targets", [])
     if axd or pbs:
-        L.append("## 3. ASP.NET-specific surface")
-        L.append("")
+        section("ASP.NET-specific surface")
         if axd:
             L.append("### Resource handlers (`.axd`)")
             L.append("")
@@ -239,8 +358,7 @@ def main():
             L.append("")
 
     # --- Full inventory --------------------------------------------------
-    L.append("## 4. Full endpoint inventory")
-    L.append("")
+    section("Full endpoint inventory")
     shown = eps[:args.max_endpoints] if args.max_endpoints else eps
     L.append("| ID | Method | Path | Params | Auth signal | Discovered via |")
     L.append("| --- | --- | --- | --- | --- | --- |")
@@ -256,8 +374,7 @@ def main():
     L.append("")
 
     # --- Limitations -----------------------------------------------------
-    L.append("## 5. Method and limitations")
-    L.append("")
+    section("Method and limitations")
     L.append("Endpoints were recovered by parsing client-side JavaScript, `.axd` payloads and "
              "markup for request call sites (`fetch`, `XMLHttpRequest`, jQuery AJAX, axios, "
              "Angular `HttpClient`, ASP.NET service proxies) and for endpoint-shaped string "
@@ -274,6 +391,11 @@ def main():
              "taint reasoning behind medium-confidence DOM XSS rows.")
     L.append("- **Dead code counts.** A bundle often ships endpoints the deployed application "
              "no longer exposes, and unreachable sinks.")
+    L.append("- **Secret detection is pattern-based.** A credential in an unusual format, "
+             "or assembled at runtime, will be missed; conversely a high-entropy value that "
+             "is not a credential can appear as `probable`. Verify before reporting.")
+    L.append("- **Attack suggestions are generated from names and shapes**, not from "
+             "behaviour. They order a testing queue; none of them is a finding.")
     L.append("- Coverage is bounded by the files supplied. Bundles behind authentication, "
              "lazy-loaded chunks and per-role bundles must be captured separately — a "
              "low-privilege account's bundle is the useful one for authorization testing, "
@@ -287,6 +409,12 @@ def main():
     print("  %d endpoints, %d flagged for authorization testing" % (len(eps), len(candidates)))
     if dom:
         print("  %d DOM XSS candidates" % dom.get("finding_count", 0))
+    if sec:
+        st = sec.get("by_tier", {})
+        print("  %d confirmed / %d probable credentials" % (
+            st.get("confirmed", 0), st.get("probable", 0)))
+    if atk:
+        print("  %d parameters matched an attack class" % len(atk.get("interesting_parameters", [])))
     return 0
 
 
