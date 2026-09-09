@@ -131,6 +131,18 @@ check "legacy-version contextual" \
   "$(atk "sum(1 for e in d['endpoints'] if 'legacy-version' in e['signals'] and '/v2/' in e['path'])")" "0"
 check "secret notes surfaced"    "$(atk "1 if any('alg=none' in n for n in d['secret_notes']) else 0")" "1"
 
+echo "== analyse_file (single-file briefing) =="
+python3 "$SKILL/scripts/analyse_file.py" "$FIX/config.js" --json --out "$WORK/single.json" >/dev/null
+af() { python3 -c "import json; d=json.load(open('$WORK/single.json')); print($1)"; }
+check "single-file analysis runs"  "$([ -f "$WORK/single.json" ] && echo yes)" "yes"
+check "endpoints found in file"    "$(af "1 if len(d['endpoints'])>0 else 0")" "1"
+check "credentials found in file"  "$(af "1 if any(f['tier']=='confirmed' for f in d['secrets']) else 0")" "1"
+check "cross-cutting observations" "$(af "1 if len(d['observations'])>0 else 0")" "1"
+python3 "$SKILL/scripts/analyse_file.py" "$FIX/app.js" > "$WORK/brief.txt"
+check "briefing has WHAT THIS FILE IS" "$(grep -c '^WHAT THIS FILE IS' "$WORK/brief.txt")" "1"
+check "briefing has WHAT STANDS OUT"   "$(grep -c '^WHAT STANDS OUT' "$WORK/brief.txt")" "1"
+check "briefing states the caveat"     "$(grep -c 'not about server-side' "$WORK/brief.txt")" "1"
+
 echo "== gen_report =="
 python3 "$SKILL/scripts/gen_report.py" --endpoints "$WORK/endpoints.json" \
   --domxss "$WORK/domxss.json" --secrets "$WORK/secrets.json" \

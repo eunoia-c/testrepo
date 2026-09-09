@@ -1,6 +1,6 @@
 ---
 name: js-recon
-description: Static analysis copilot for web VAPT — mines JavaScript, .axd resources, bundles and Burp exports for HTTP endpoints, hardcoded secrets and API keys, and interesting parameters; builds fuzzing wordlists; generates Burp Repeater-ready raw HTTP requests (never curl); flags endpoints with no authorization evidence; finds DOM XSS source-to-sink paths; ranks the attack surface with concrete suggested tests per endpoint and parameter; and writes it all up as a Markdown findings report. Use this whenever someone is doing a web application penetration test, security assessment, bug bounty or code review and mentions JavaScript files, JS bundles, .axd / ScriptResource.axd / WebResource.axd, minified scripts, a Burp sitemap or proxy export, endpoint discovery or enumeration, hidden or undocumented API routes, building a wordlist for ffuf/feroxbuster/dirsearch, hardcoded credentials, leaked API keys or tokens in frontend code, JWTs, source maps, interesting or dangerous parameters, what to attack or where to start on a target, testing for missing authorization or broken access control, IDOR, SSRF, mass assignment, DOM XSS or dangerous sinks like innerHTML and eval, or asks for a request they can paste into Repeater. Also use it when they simply hand over a folder of .js files and ask what is interesting in there, or ask to "look at this bundle", even if they never say the words static analysis.
+description: Static analysis copilot for web VAPT — analyses a single JavaScript file in depth (what it is, which libraries and versions it ships, and what matters in it) or mines whole corpora of JavaScript, .axd resources, bundles and Burp exports for HTTP endpoints, hardcoded secrets and API keys, and interesting parameters; builds fuzzing wordlists; generates Burp Repeater-ready raw HTTP requests (never curl); flags endpoints with no authorization evidence; finds DOM XSS source-to-sink paths; ranks the attack surface with concrete suggested tests per endpoint and parameter; and writes it all up as a Markdown findings report. Use this whenever someone is doing a web application penetration test, security assessment, bug bounty or code review and mentions JavaScript files, JS bundles, .axd / ScriptResource.axd / WebResource.axd, minified scripts, a Burp sitemap or proxy export, endpoint discovery or enumeration, hidden or undocumented API routes, building a wordlist for ffuf/feroxbuster/dirsearch, hardcoded credentials, leaked API keys or tokens in frontend code, JWTs, source maps, interesting or dangerous parameters, what to attack or where to start on a target, testing for missing authorization or broken access control, IDOR, SSRF, mass assignment, DOM XSS or dangerous sinks like innerHTML and eval, or asks for a request they can paste into Repeater. Trigger on single-file requests too — "do static analysis on this js file", "what can you say about this script", "what is this bundle", "is this library version vulnerable", "review this .js" — and on whole folders, or when they simply hand over .js files and ask what is interesting in there, even if they never say the words static analysis.
 ---
 
 # JS Recon — static analysis copilot for web VAPT
@@ -28,6 +28,8 @@ Five scripts in `scripts/`, each doing one job. Run them in this order — later
 stages consume earlier output.
 
 ```
+one file ─────> analyse_file.py ──> a briefing you read
+
 Burp export ──> parse_burp.py ──> burp_js/ + burp_index.json
                                         │
 saved .js/.axd files ───────────────────┴──> extract_endpoints.py ──> endpoints.json
@@ -200,7 +202,42 @@ behaviour before spending payloads on it.** Change it to something benign and
 different, and look for any response change at all. Client bundles are full of
 dead parameters.
 
-### 8. The report
+### 8. One file, in depth
+
+```bash
+python3 scripts/analyse_file.py path/to/app.bundle.js
+python3 scripts/analyse_file.py app.js --json --out app-analysis.json
+```
+
+For "here is one file, what can you tell me about it" — a different question
+from "what is the whole attack surface", and it deserves a different answer.
+Prints a briefing rather than JSON: what the file *is* first, then libraries and
+versions, endpoints, secrets, DOM XSS, and a **What stands out** section.
+
+Two things it adds over running the other scripts separately:
+
+**Fingerprinting.** Bundler, framework, and third-party library versions,
+checked against a short list of well-known advisories (jQuery below 3.5,
+lodash below 4.17.21, Moment below 2.29.4, AngularJS 1.x, and a few more). On a
+vendor bundle this is often *the* finding, because an outdated library with a
+published CVE is concrete in a way that "this path showed no Authorization
+header" is not. The advisory list is deliberately short — a stale or wrong entry
+costs more credibility than a missing one. Always confirm the version actually
+loaded at runtime, since bundles frequently ship a version string that a shim
+then replaces.
+
+**Cross-cutting observations.** A token in web storage is unremarkable; an
+`innerHTML` sink is unremarkable; both in one file is a session-theft chain.
+Admin paths in a bundle served to everyone, endpoints spanning two API versions,
+a referenced source map — these joins are the whole reason to look at a file as
+a unit, and they are what someone actually wants when they hand you one file.
+
+Reach for this when the input is one file, when someone asks what a file is or
+does, or as a first look before deciding whether the full pipeline is warranted.
+Use the pipeline instead when the input is a directory or a Burp export, since
+the corpus-wide inventory and ranking are what matter there.
+
+### 9. The report
 
 ```bash
 python3 scripts/gen_report.py --endpoints endpoints.json --domxss domxss.json \
@@ -243,6 +280,11 @@ individually. That shapes how broadly to test.
 **A token in `localStorage` next to an XSS finding.** Those two facts together
 are session theft, and worth stating explicitly in the report rather than
 leaving as two separate rows.
+
+**One file versus a corpus.** If someone hands you a single file and asks what
+it is, `analyse_file.py` answers that directly and reads in under a minute. The
+JSON pipeline is for corpora, where the value is in the inventory and the
+ranking rather than in any one file.
 
 **Cross-referencing the separate outputs.** The individual artifacts are less
 than their combination, and connecting them is judgement the scripts cannot do:

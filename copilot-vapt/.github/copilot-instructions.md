@@ -25,6 +25,7 @@ The installer puts the tested `js-recon` scripts there; they may also appear at
 
 | Script | Job |
 | --- | --- |
+| `analyse_file.py` | One file in depth: what it is, library versions, and what matters in it |
 | `parse_burp.py` | Burp XML export → saved response bodies + observed-request index |
 | `extract_endpoints.py` | Endpoint inventory with authorization verdicts |
 | `find_secrets.py` | Credentials, API keys, JWTs, disclosures |

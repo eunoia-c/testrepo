@@ -120,6 +120,7 @@ treats them as captured evidence rather than source code to tidy up.
 
 | Command | What it does |
 | --- | --- |
+| `/analyse-file` | Deep-dive one file: what it is, library versions, and what matters in it |
 | `/js-endpoints` | Recover the endpoint inventory with authorization verdicts; ingests Burp XML exports |
 | `/js-secrets` | Credentials, API keys, JWTs (decoded), source maps, internal hosts |
 | `/js-domxss` | DOM XSS source-to-sink candidates, ranked by evidence |
@@ -147,6 +148,10 @@ subfolder.
 ```
 
 `/burp-request` and `/wordlist` are on-demand once the inventory exists.
+
+`/analyse-file` is separate from that flow — use it when you have one file and
+want to know what it is, or as a quick first look before committing to the full
+pipeline.
 
 ## Differences from the Claude Code skill
 
