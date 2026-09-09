@@ -19,8 +19,9 @@ conversation does not work. Write a script, run it, and reason about its output.
 
 ## Check for existing tooling first
 
-**Before writing any analysis script, look for `js-recon` scripts in the
-workspace** — commonly at `.claude/skills/js-recon/scripts/` or `scripts/`:
+**Before writing any analysis script, check `scripts/` in the workspace root.**
+The installer puts the tested `js-recon` scripts there; they may also appear at
+`.claude/skills/js-recon/scripts/` in a full checkout.
 
 | Script | Job |
 | --- | --- |
@@ -33,7 +34,8 @@ workspace** — commonly at `.claude/skills/js-recon/scripts/` or `scripts/`:
 | `gen_wordlist.py` | Fuzzing wordlists |
 | `gen_report.py` | Markdown findings report |
 
-If they are present, **run them instead of writing your own**. They are tested
+If they are present, **run them instead of writing your own**. Check once at the
+start of a task rather than per file — a single `ls scripts/` settles it. They are tested
 (see `tests/smoke_test.sh`) and they handle things an ad-hoc parser reliably
 gets wrong: Burp's `base64="true"` encoding on request/response elements,
 splitting raw HTTP headers from bodies, attributing a call's method and
@@ -41,9 +43,13 @@ authorization headers to the right call rather than to the next one, and
 building the observed-request index that distinguishes "the client attaches no
 credential" from "this path was seen answering without one".
 
-Run them with `--help` to see the options. Only write new code when no such
-script exists, or when the tester asks for something the existing ones do not
-cover — and say which you are doing and why.
+Run them with `--help` to see the options.
+
+Only write new analysis code when no such script exists, or when the tester asks
+for something the existing ones do not cover. When you do, say so explicitly and
+note that it is unverified — the tester needs to know which results came from
+tested code and which did not. If you find yourself writing something a bundled
+script already does, stop and run that instead.
 
 ## Language discipline in findings
 

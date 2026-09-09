@@ -14,14 +14,13 @@ export, handle that first — see the last section.
 
 ## Approach
 
-**First check whether `js-recon` scripts already exist in the workspace** (often
-`.claude/skills/js-recon/scripts/`). If they do, use them rather than writing
-your own — they are tested and handle the parsing details listed in the
-workspace instructions:
+**First check `scripts/` in the workspace root.** If the tested `js-recon`
+scripts are there, use them rather than writing your own — they handle the
+parsing details listed in the workspace instructions:
 
 ```bash
-python3 <path>/parse_burp.py export.xml --out-dir burp_js --index burp_index.json --all-responses
-python3 <path>/extract_endpoints.py burp_js ./js --out endpoints.json
+python3 scripts/parse_burp.py export.xml --out-dir burp_js --index burp_index.json --all-responses
+python3 scripts/extract_endpoints.py burp_js ./js --out endpoints.json
 ```
 
 `--all-responses` matters: without it only script/JSON MIME types are saved, so

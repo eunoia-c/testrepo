@@ -11,14 +11,28 @@ This is the Copilot-native counterpart to the `js-recon` skill in
 
 ## Install
 
-Copy the `.github` directory into the workspace you open in VS Code — typically
-the folder holding the engagement's saved bundles and Burp exports:
-
 ```bash
-cp -r copilot-vapt/.github /path/to/engagement-workspace/
+./copilot-vapt/install.sh /path/to/engagement-workspace --verify
 ```
 
-Then in VS Code, open Copilot Chat in that workspace.
+That installs both halves, which have to travel together:
+
+- `.github/` — the instructions, chat mode and prompt files
+- `scripts/` — the tested `js-recon` analysis scripts the prompts call
+
+Then open that folder in VS Code and pick the **VAPT Recon** chat mode.
+
+`--verify` runs the smoke test so you know the scripts work before you start.
+`--force` skips the overwrite prompts.
+
+**Install both or neither.** If the prompts arrive without `scripts/`, Copilot
+has nothing to call and rewrites each analysis from scratch — untested, and
+differently every run. That is the single most likely way this package
+underperforms, and it looks like it is working while it happens.
+
+The installer copies the scripts from `.claude/skills/js-recon/scripts/` rather
+than keeping a second copy in this directory, so there is one source of truth
+and the two packages cannot drift apart.
 
 If prompt files are not picked up, check that they are enabled in settings
 (`chat.promptFiles`) — availability and the exact setting key have moved between
@@ -51,6 +65,14 @@ treats them as captured evidence rather than source code to tidy up.
 | `/burp-request` | Raw HTTP for Repeater, with the credential-stripped pair |
 | `/wordlist` | Fuzzing wordlists from the inventory |
 | `/vapt-report` | Assemble everything into a Markdown findings report |
+
+## Verifying it is working
+
+The tell that something is wrong is Copilot **writing** an analysis script
+instead of running one. If you see it create `analyse_endpoints.py`,
+`analyse_secrets.py` or similar, it could not see `scripts/`. Check that the
+folder open in VS Code is the one you installed into — not a parent, and not a
+subfolder.
 
 ## Suggested flow
 
@@ -91,16 +113,15 @@ verdict table, the parameter classes, the DOM XSS sink catalog, the report
 structure and the reporting discipline are all in the prompt files. Nothing was
 dropped in translation; only the determinism was.
 
-**The prompts prefer the tested scripts when they are reachable.** If the
-`js-recon` scripts are in the same workspace (or you copy `scripts/` alongside
-`.github/`), the prompts direct Copilot to run them rather than writing its own
-— which is the best of both: Copilot's chat workflow driving tested,
-deterministic implementations. Copilot only writes new code when nothing
-suitable exists, and is told to say so when it does.
+**Installing with `install.sh` closes most of that gap.** The prompts check
+`scripts/` first and run the tested implementations, so you get Copilot's chat
+workflow driving deterministic code. Copilot only writes new analysis code when
+nothing suitable exists, and is instructed to say so and flag it as unverified.
 
-If you keep them separate, the practical hybrid is to run `/js-endpoints` once,
-keep the script Copilot writes, and drive subsequent passes with that script
-directly.
+The residual difference is that Copilot decides *which* script to run and how to
+interpret the output, where the Claude skill follows a fixed pipeline. That is
+usually an advantage — it adapts to what you actually have — but it means two
+runs can take different routes through the same data.
 
 ## Scope
 
