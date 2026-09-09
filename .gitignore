@@ -1,0 +1,10 @@
+# Analysis artefacts - engagement data must not be committed
+results.json
+report.md
+wordlist*.txt
+*_authed.txt
+*_unauth.txt
+captured*/
+
+__pycache__/
+*.pyc
