@@ -15,8 +15,35 @@ themselves and explain what to look for in the response.
 
 Generating analysis code that reads local files is fine and often necessary —
 bundles are frequently megabytes on a single line, and reading them into the
-conversation does not work. Write a throwaway script, run it, and reason about
-its output.
+conversation does not work. Write a script, run it, and reason about its output.
+
+## Check for existing tooling first
+
+**Before writing any analysis script, look for `js-recon` scripts in the
+workspace** — commonly at `.claude/skills/js-recon/scripts/` or `scripts/`:
+
+| Script | Job |
+| --- | --- |
+| `parse_burp.py` | Burp XML export → saved response bodies + observed-request index |
+| `extract_endpoints.py` | Endpoint inventory with authorization verdicts |
+| `find_secrets.py` | Credentials, API keys, JWTs, disclosures |
+| `dom_xss_scan.py` | DOM XSS source-to-sink candidates |
+| `suggest_attacks.py` | Endpoint/parameter ranking with suggested tests |
+| `make_request.py` | Raw HTTP for Burp Repeater |
+| `gen_wordlist.py` | Fuzzing wordlists |
+| `gen_report.py` | Markdown findings report |
+
+If they are present, **run them instead of writing your own**. They are tested
+(see `tests/smoke_test.sh`) and they handle things an ad-hoc parser reliably
+gets wrong: Burp's `base64="true"` encoding on request/response elements,
+splitting raw HTTP headers from bodies, attributing a call's method and
+authorization headers to the right call rather than to the next one, and
+building the observed-request index that distinguishes "the client attaches no
+credential" from "this path was seen answering without one".
+
+Run them with `--help` to see the options. Only write new code when no such
+script exists, or when the tester asks for something the existing ones do not
+cover — and say which you are doing and why.
 
 ## Language discipline in findings
 

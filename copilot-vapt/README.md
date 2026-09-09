@@ -91,9 +91,16 @@ verdict table, the parameter classes, the DOM XSS sink catalog, the report
 structure and the reporting discipline are all in the prompt files. Nothing was
 dropped in translation; only the determinism was.
 
-If you want reproducibility on a long engagement, the practical hybrid is to run
-`/js-endpoints` once, keep the script Copilot writes, and drive subsequent
-passes with that script directly.
+**The prompts prefer the tested scripts when they are reachable.** If the
+`js-recon` scripts are in the same workspace (or you copy `scripts/` alongside
+`.github/`), the prompts direct Copilot to run them rather than writing its own
+— which is the best of both: Copilot's chat workflow driving tested,
+deterministic implementations. Copilot only writes new code when nothing
+suitable exists, and is told to say so when it does.
+
+If you keep them separate, the practical hybrid is to run `/js-endpoints` once,
+keep the script Copilot writes, and drive subsequent passes with that script
+directly.
 
 ## Scope
 

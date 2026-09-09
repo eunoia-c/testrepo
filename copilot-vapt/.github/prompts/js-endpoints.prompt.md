@@ -14,10 +14,26 @@ export, handle that first — see the last section.
 
 ## Approach
 
-Read the files directly if they are small and formatted. If they are minified
-(one very long line, mangled names), do **not** try to read them into context:
-write a Python script, run it, and work from its JSON output. Save the script
-as `analyse_endpoints.py` so it can be re-run as new bundles arrive.
+**First check whether `js-recon` scripts already exist in the workspace** (often
+`.claude/skills/js-recon/scripts/`). If they do, use them rather than writing
+your own — they are tested and handle the parsing details listed in the
+workspace instructions:
+
+```bash
+python3 <path>/parse_burp.py export.xml --out-dir burp_js --index burp_index.json --all-responses
+python3 <path>/extract_endpoints.py burp_js ./js --out endpoints.json
+```
+
+`--all-responses` matters: without it only script/JSON MIME types are saved, so
+**inline `<script>` blocks in HTML pages are skipped entirely** — and in
+server-rendered applications that is often where the interesting code lives.
+
+Only if no such script exists: read the files directly when they are small and
+formatted, and when they are minified (one very long line, mangled names) do
+**not** try to read them into context — write a Python script, run it, and work
+from its JSON output. Save it as `analyse_endpoints.py` so it can be re-run as
+new bundles arrive, and tell the tester it is unverified ad-hoc code rather than
+the tested pipeline.
 
 ## What to extract
 
@@ -81,7 +97,10 @@ presenting the results.
 ## Burp exports
 
 If a Burp sitemap or proxy XML export is present, process it first. Each `item`
-carries base64 `request` and `response` elements. Two reasons it outranks loose
+carries `request` and `response` elements that are **base64-encoded when the
+element has `base64="true"`** — reading `.text` without checking that attribute
+parses base64 as HTTP and silently finds nothing. This is the most common way a
+hand-written Burp parser fails, and it fails quietly. Two reasons it outranks loose
 files: it contains bundles served *behind authentication* that cannot be fetched
 anonymously, and it records real request headers.
 
