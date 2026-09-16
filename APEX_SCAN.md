@@ -16,7 +16,28 @@ Outputs `results.json`, `results.csv` and `report.md` into `--out`.
 `triggers/`, `pages/` layouts are handled, and reported paths are relative to
 the input root. A single file also works.
 
-Files are picked up two ways:
+Files are picked up three ways:
+
+0. **JSON dumps** — `aura_dump.py` and other API-based dumpers write each
+   ApexClass as JSON with the source in a `Body` field. `.json` files are parsed
+   natively: the Apex is decoded out of the record and analysed as source, so
+   **line numbers refer to the Apex, not the JSON wrapper**, and a withheld
+   `"Body": "(hidden)"` is counted against coverage like any other withheld
+   class. Findings are labelled `file.json::ClassName`.
+
+   Recognised shapes: a single record object, a list of records, a
+   `{"records": [...]}` query envelope, and a `{"ClassName": "<body>"}` mapping.
+   Body comes from `Body`, `Markup` (Visualforce/components) or `Source`
+   (Aura). A `.json` file that is not an Apex dump — `package.json`, say — is
+   skipped without being scanned.
+
+   **Do not pass `--ext json`.** It is unnecessary, and before native support
+   existed it produced quietly wrong results: the body arrives as one physical
+   line with `\n` as two characters, so the method parser cannot see statement
+   structure and the taint checker missed injections outright while still
+   reporting the sharing finding — the shape of result that looks like it worked.
+
+Then, for files that are not dumps:
 
 1. **By extension** — `.cls`, `.trigger`, `.page`, `.cmp`, `.component`, `.evt`,
    `.apex`, `.apxc`, `.apxt`, `.app`, `.intf`, `.tokens`. Add more with
@@ -157,7 +178,8 @@ State these rather than let them be assumed away:
 - **No type resolution.** The analyser works on text structure, not a symbol
   table, so an unusual formatting or a construct the regexes do not model can be
   missed.
-- **Withheld bodies are invisible.** See Coverage.
+- **Withheld bodies are invisible.** See Coverage. In a JSON dump this is
+  `"Body": "(hidden)"`, detected per record rather than per file.
 - **Secret detection is pattern- and entropy-based.** A credential in an unusual
   format is missed; a high-entropy non-credential can appear at LOW confidence.
 - **Findings are candidates.** Every one should be confirmed against the org

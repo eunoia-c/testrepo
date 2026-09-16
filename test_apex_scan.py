@@ -694,6 +694,148 @@ public without sharing class Sample {
 
 
 # --------------------------------------------------------------------------
+class TestJsonDumps(unittest.TestCase):
+    """aura_dump.py writes each ApexClass as JSON with the source in a Body
+    field. Scanning that JSON as text does not work -- the body is one physical
+    line with \\n as two characters, so the parser cannot see statement
+    structure and the taint checker misses injections outright, while a withheld
+    body reads as `"Body": "(hidden)"` and never registers as withheld. These
+    assert the decoded path instead."""
+
+    BODY = ("public without sharing class AccountCtrl {\n"
+            "    @AuraEnabled\n"
+            "    public static List<Account> find(String term) {\n"
+            "        String q = 'SELECT Id FROM Account WHERE Name = ' + term;\n"
+            "        return Database.query(q);\n"
+            "    }\n"
+            "}")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmp, "dump")
+        self.out = os.path.join(self.tmp, "out")
+        os.makedirs(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, obj):
+        with open(os.path.join(self.src, name), "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, indent=2)
+
+    # -- extraction ----------------------------------------------------
+    def test_extract_single_object(self):
+        recs = A.extract_dump_records(json.dumps({"Name": "C", "Body": self.BODY}))
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0].name, "C")
+        self.assertEqual(recs[0].body, self.BODY)
+
+    def test_extract_list_of_records(self):
+        recs = A.extract_dump_records(json.dumps(
+            [{"Name": "A", "Body": self.BODY}, {"Name": "B", "Body": self.BODY}]))
+        self.assertEqual([r.name for r in recs], ["A", "B"])
+
+    def test_extract_records_envelope(self):
+        recs = A.extract_dump_records(json.dumps(
+            {"totalSize": 1, "done": True, "records": [{"Name": "A", "Body": self.BODY}]}))
+        self.assertEqual(len(recs), 1)
+
+    def test_extract_markup_field_for_pages(self):
+        recs = A.extract_dump_records(json.dumps(
+            {"Name": "P", "Markup": "<apex:page controller=\"X\"/>"}))
+        self.assertEqual(recs[0].field, "Markup")
+
+    def test_extract_name_keyed_mapping(self):
+        recs = A.extract_dump_records(json.dumps({"AccountCtrl": self.BODY}))
+        self.assertEqual(recs[0].name, "AccountCtrl")
+
+    def test_non_apex_json_is_not_a_dump(self):
+        self.assertIsNone(A.extract_dump_records(json.dumps({"a": 1, "b": [2, 3]})))
+
+    def test_invalid_json_is_not_a_dump(self):
+        self.assertIsNone(A.extract_dump_records("{not json"))
+
+    # -- scanning ------------------------------------------------------
+    def test_injection_found_in_json_body(self):
+        """The case that silently failed before: --ext json found only the
+        sharing rule and missed the injection entirely."""
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        findings, _e, _s = A.Scanner().scan_dir(self.src)
+        self.assertIn("APEX-SOQL-001", {f.rule_id for f in findings})
+
+    def test_line_numbers_are_apex_not_json(self):
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        findings, _e, _s = A.Scanner().scan_dir(self.src)
+        soql = [f for f in findings if f.rule_id == "APEX-SOQL-001"][0]
+        self.assertEqual(soql.line, 5)          # line within the decoded body
+        self.assertIn("Database.query", soql.snippet)
+
+    def test_record_path_identifies_file_and_class(self):
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        findings, _e, _s = A.Scanner().scan_dir(self.src)
+        self.assertTrue(all(f.path == "AccountCtrl.json::AccountCtrl" for f in findings))
+
+    def test_hidden_body_counted_with_record_name(self):
+        self._write("Managed.json", {"Name": "ManagedThing",
+                                     "NamespacePrefix": "acme", "Body": "(hidden)"})
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_hidden, 1)
+        self.assertEqual(stats.hidden_files, ["Managed.json::ManagedThing"])
+        self.assertEqual(stats.files_analysed, 0)
+
+    def test_empty_body_counted_as_empty(self):
+        self._write("Blank.json", {"Name": "Blank", "Body": ""})
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_empty, 1)
+
+    def test_multiple_records_in_one_file(self):
+        self._write("all.json", {"records": [
+            {"Name": "A", "Body": self.BODY},
+            {"Name": "B", "Body": "(hidden)"},
+            {"Name": "C", "Body": self.BODY}]})
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.dump_files, 1)
+        self.assertEqual(stats.records_from_dumps, 3)
+        self.assertEqual(stats.files_analysed, 2)
+        self.assertEqual(stats.files_hidden, 1)
+
+    def test_json_needs_no_ext_flag(self):
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        rc = A.main(["--input", self.src, "--out", self.out, "--format", "json", "--quiet"])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.out, "results.json")) as fh:
+            d = json.load(fh)
+        self.assertEqual(d["coverage"]["dump_files"], 1)
+
+    def test_ext_json_flag_does_not_double_process(self):
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        _f, _e, stats = A.Scanner(extra_extensions=[".json"]).scan_dir(self.src)
+        self.assertEqual(stats.records_from_dumps, 1)
+        self.assertEqual(stats.files_analysed, 1)
+
+    def test_unrelated_json_skipped_not_scanned(self):
+        self._write("package.json", {"name": "x", "version": "1.0.0"})
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_seen, 0)
+        self.assertEqual(stats.files_skipped_non_apex, 1)
+
+    def test_entry_points_inventoried_from_dump(self):
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        _f, entries, _s = A.Scanner().scan_dir(self.src)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind, "@AuraEnabled")
+        self.assertEqual(entries[0].sharing, "without sharing")
+
+    def test_markdown_renders_decoded_apex(self):
+        self._write("AccountCtrl.json", {"Name": "AccountCtrl", "Body": self.BODY})
+        A.main(["--input", self.src, "--out", self.out, "--format", "md", "--quiet"])
+        md = open(os.path.join(self.out, "report.md"), encoding="utf-8").read()
+        self.assertIn("```apex", md)
+        self.assertIn("return Database.query(q);", md)   # real source, not JSON
+        self.assertNotIn('\\n    @AuraEnabled', md)      # not the escaped blob
+
+
+# --------------------------------------------------------------------------
 class TestRedactionAcrossOutputs(unittest.TestCase):
     """The markdown report prints three lines of context either side of every
     finding. A credential on one of those lines leaked into the report even

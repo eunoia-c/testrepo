@@ -78,6 +78,85 @@ BINARY_EXTENSIONS = {
 SNIFF_MAX_BYTES = 8 * 1024 * 1024   # do not read very large files to sniff
 SNIFF_HEAD = 4096                   # a declaration appears near the top or not at all
 
+# aura_dump.py and other API-based dumpers write each ApexClass as JSON with the
+# source in a Body field. Scanning that JSON as if it were Apex does not work:
+# the body is one physical line with \n as two characters, so line numbers are
+# meaningless, the method parser cannot see statement structure, and a withheld
+# body reads as `"Body": "(hidden)"` rather than a file whose whole content is
+# "(hidden)" -- which silently defeats the coverage accounting. Parse it instead.
+DUMP_EXTENSIONS = {".json"}
+
+BODY_FIELDS = ("Body", "body", "Markup", "markup", "Source", "source",
+               "SourceCode", "content", "Content")
+NAME_FIELDS = ("Name", "name", "FullName", "fullName", "DeveloperName",
+               "developerName", "MasterLabel")
+RECORD_LIST_KEYS = ("records", "Records", "results", "data", "items", "classes",
+                    "triggers", "pages", "components", "ApexClass", "ApexTrigger",
+                    "ApexPage", "ApexComponent")
+META_FIELDS = ("Id", "ApiVersion", "Status", "NamespacePrefix", "LengthWithoutComments",
+               "IsValid", "CreatedDate", "LastModifiedDate", "attributes")
+
+
+@dataclass
+class DumpRecord:
+    name: str
+    body: str
+    field: str
+    meta: dict = field(default_factory=dict)
+
+
+def _record_from_obj(obj: dict) -> DumpRecord | None:
+    for fld in BODY_FIELDS:
+        if fld in obj and isinstance(obj[fld], str):
+            name = ""
+            for nf in NAME_FIELDS:
+                if isinstance(obj.get(nf), str) and obj[nf]:
+                    name = obj[nf]
+                    break
+            meta = {k: obj[k] for k in META_FIELDS if k in obj}
+            if isinstance(meta.get("attributes"), dict):
+                meta["type"] = meta.pop("attributes").get("type", "")
+            return DumpRecord(name=name, body=obj[fld], field=fld, meta=meta)
+    return None
+
+
+def extract_dump_records(text: str) -> list[DumpRecord] | None:
+    """Records from an API dump, or None if this is not one.
+
+    Returning None (rather than an empty list) distinguishes "not a dump" from
+    "a dump containing nothing", because the two need different handling: the
+    first is skipped as non-Apex, the second is a coverage problem to report."""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+    out: list[DumpRecord] = []
+
+    def consume(obj) -> None:
+        if isinstance(obj, dict):
+            rec = _record_from_obj(obj)
+            if rec is not None:
+                out.append(rec)
+                return
+            for key in RECORD_LIST_KEYS:
+                if isinstance(obj.get(key), list):
+                    for item in obj[key]:
+                        consume(item)
+                    return
+            # A mapping of class name -> body, or name -> record.
+            for key, val in obj.items():
+                if isinstance(val, str) and len(val) > 40 and APEX_SNIFF_RE.search(val):
+                    out.append(DumpRecord(name=str(key), body=val, field=str(key)))
+                elif isinstance(val, (dict, list)):
+                    consume(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                consume(item)
+
+    consume(data)
+    return out if out else None
+
 # A dumped body that the API withheld. Managed-package classes come back like
 # this, and counting them separately is the difference between "no findings"
 # and "no visibility".
@@ -1550,6 +1629,8 @@ class ScanStats:
     files_by_extension: int = 0
     files_by_content_sniff: int = 0
     files_skipped_non_apex: int = 0
+    dump_files: int = 0
+    records_from_dumps: int = 0
     extensions_present: dict = field(default_factory=dict)
     sniffed_files: list[str] = field(default_factory=list)
     hidden_files: list[str] = field(default_factory=list)
@@ -1576,46 +1657,74 @@ class Scanner:
         stats = ScanStats()
         findings: list[Finding] = []
         entries: list[EntryPoint] = []
+        # Text of anything that produced a finding, so the report renders the
+        # Apex that was actually analysed. For a JSON dump that is the decoded
+        # body, which does not exist on disk anywhere.
+        self.sources_for_report: dict[str, str] = {}
+
         for path, how in self._walk(root, stats):
-            stats.files_seen += 1
-            if how == "extension":
-                stats.files_by_extension += 1
-            else:
-                stats.files_by_content_sniff += 1
             rel = os.path.relpath(path, root)
-            if how == "sniff":
-                stats.sniffed_files.append(rel)
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
             except OSError as exc:
+                stats.files_seen += 1
                 stats.files_unreadable += 1
                 stats.unreadable_files.append({"path": rel, "error": str(exc)})
                 continue
 
-            stripped = text.strip()
-            if not stripped:
-                stats.files_empty += 1
-                stats.empty_files.append(rel)
-                continue
-            if stripped in HIDDEN_BODY_MARKERS or stripped.lower() == "(hidden)":
-                stats.files_hidden += 1
-                stats.hidden_files.append(rel)
-                continue
+            records = None
+            if how == "dump" or os.path.splitext(path)[1].lower() in DUMP_EXTENSIONS:
+                records = extract_dump_records(text)
+                if records is None:
+                    # Valid JSON, but not an Apex dump -- or not JSON at all.
+                    stats.files_skipped_non_apex += 1
+                    continue
+                stats.dump_files += 1
 
-            f, e, err = self.scan_text(text, rel, path)
-            if err:
-                stats.files_parse_errors += 1
-                stats.parse_error_files.append({"path": rel, "error": err})
-            stats.files_analysed += 1
-            findings.extend(f)
-            entries.extend(e)
+            if records is not None:
+                for rec in records:
+                    stats.records_from_dumps += 1
+                    label = "%s::%s" % (rel, rec.name) if rec.name else rel
+                    self._ingest(label, rec.body, stats, findings, entries, path)
+            else:
+                if how == "extension":
+                    stats.files_by_extension += 1
+                elif how == "sniff":
+                    stats.files_by_content_sniff += 1
+                    stats.sniffed_files.append(rel)
+                self._ingest(rel, text, stats, findings, entries, path)
 
         findings.sort(key=sort_key)
         entries.sort(key=lambda e: (e.path.replace(os.sep, "/"), e.line, e.method))
         for fi in findings:
             fi.fingerprint = fi.compute_fingerprint()
         return findings, entries, stats
+
+    def _ingest(self, rel: str, text: str, stats: ScanStats,
+                findings: list[Finding], entries: list[EntryPoint],
+                path: str | None = None) -> None:
+        """One analysable unit: a file, or one record out of a dump."""
+        stats.files_seen += 1
+        stripped = text.strip()
+        if not stripped:
+            stats.files_empty += 1
+            stats.empty_files.append(rel)
+            return
+        if stripped in HIDDEN_BODY_MARKERS or stripped.lower() == "(hidden)":
+            stats.files_hidden += 1
+            stats.hidden_files.append(rel)
+            return
+
+        f, e, err = self.scan_text(text, rel, path)
+        if err:
+            stats.files_parse_errors += 1
+            stats.parse_error_files.append({"path": rel, "error": err})
+        stats.files_analysed += 1
+        if f:
+            self.sources_for_report[rel] = text
+        findings.extend(f)
+        entries.extend(e)
 
     def scan_text(self, text: str, relpath: str,
                   path: str | None = None) -> tuple[list[Finding], list[EntryPoint], str]:
@@ -1685,6 +1794,9 @@ class Scanner:
                 stats.extensions_present[ext or "(none)"] = \
                     stats.extensions_present.get(ext or "(none)", 0) + 1
 
+                if ext in DUMP_EXTENSIONS:
+                    yield path, "dump"
+                    continue
                 if ext in self.extensions:
                     yield path, "extension"
                     continue
@@ -1813,7 +1925,17 @@ def write_markdown(path: str, findings: list[Finding], entries: list[EntryPoint]
     L.append("| Matched by extension | %d |" % stats.files_by_extension)
     L.append("| Matched by content (no known extension) | %d |" % stats.files_by_content_sniff)
     L.append("| Skipped as non-Apex | %d |" % stats.files_skipped_non_apex)
+    if stats.dump_files:
+        L.append("| JSON dump files parsed | %d |" % stats.dump_files)
+        L.append("| Records extracted from dumps | %d |" % stats.records_from_dumps)
     L.append("")
+    if stats.dump_files:
+        L.append("Input included %d JSON dump file(s) holding %d record(s). The Apex source "
+                 "was decoded from each record's body field before analysis, so line numbers "
+                 "below refer to the Apex itself rather than to the JSON wrapper. Records are "
+                 "identified as `file.json::ClassName`."
+                 % (stats.dump_files, stats.records_from_dumps))
+        L.append("")
     if stats.files_by_content_sniff:
         L.append("%d file(s) carried no recognised Apex extension and were included because "
                  "their content parsed as an Apex class, trigger or Visualforce markup. Bulk "
@@ -2341,15 +2463,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     # files that actually produced findings.
     sources: dict[str, SourceFile] = {}
     if "md" in formats:
+        retained = getattr(scanner, "sources_for_report", {})
         for f in kept:
             if f.path in sources:
                 continue
-            full = f.path if os.path.isabs(f.path) else os.path.join(args.input, f.path)
-            try:
-                with open(full, "r", encoding="utf-8", errors="replace") as fh:
-                    sources[f.path] = SourceFile(full, fh.read(), relpath=f.path)
-            except OSError:
-                continue
+            text = retained.get(f.path)
+            if text is None:
+                full = f.path if os.path.isabs(f.path) else os.path.join(args.input, f.path)
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+            sources[f.path] = SourceFile(f.path, text, relpath=f.path)
 
     written = []
     if "json" in formats:
@@ -2370,6 +2496,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     say("Scanned %d file(s): %d analysed, %d withheld as (hidden), %d empty, %d unreadable."
         % (stats.files_seen, stats.files_analysed, stats.files_hidden,
            stats.files_empty, stats.files_unreadable))
+    if stats.dump_files:
+        say("%d JSON dump file(s) yielded %d Apex record(s); source was decoded from the "
+            "body field so line numbers refer to the Apex, not the JSON."
+            % (stats.dump_files, stats.records_from_dumps))
     if stats.files_by_content_sniff:
         say("%d file(s) had no recognised extension and were analysed because their "
             "content parsed as Apex." % stats.files_by_content_sniff)
