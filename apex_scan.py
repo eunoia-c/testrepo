@@ -50,7 +50,33 @@ CONFIDENCES = ("HIGH", "MEDIUM", "LOW")
 SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 CONFIDENCE_RANK = {c: i for i, c in enumerate(CONFIDENCES)}
 
-APEX_EXTENSIONS = {".cls", ".trigger", ".page", ".cmp", ".apex", ".component", ".evt"}
+APEX_EXTENSIONS = {".cls", ".trigger", ".page", ".cmp", ".apex", ".component",
+                   ".evt", ".apxc", ".apxt", ".app", ".intf", ".tokens"}
+
+# Bulk dumps do not always name files helpfully: an ApexClass pulled through the
+# API may land as `MyClass`, `MyClass.txt` or `MyClass.json`. Rather than make
+# the user guess the right --ext, sniff files whose extension we do not know and
+# analyse them when the content is recognisably Apex or Visualforce.
+APEX_SNIFF_RE = re.compile(
+    r"^\s*(?:/\*[\s\S]*?\*/\s*|//[^\n]*\n\s*|@\w+[^\n]*\n\s*)*"
+    r"(?:global|public|private|protected|with\s+sharing|without\s+sharing|"
+    r"inherited\s+sharing|virtual|abstract|@isTest)\s"
+    r"[\s\S]{0,400}?\b(?:class|interface|enum)\s+\w+"
+    r"|^\s*trigger\s+\w+\s+on\s+\w+"
+    r"|<apex:page\b|<aura:(?:component|application|event)\b|<design:component\b",
+    re.I)
+
+# Never read these looking for Apex.
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp", ".pdf",
+    ".zip", ".gz", ".tar", ".jar", ".war", ".class", ".exe", ".dll", ".so",
+    ".dylib", ".bin", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".mp3", ".mp4",
+    ".avi", ".mov", ".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx", ".db",
+    ".sqlite", ".pyc", ".o", ".a",
+}
+
+SNIFF_MAX_BYTES = 8 * 1024 * 1024   # do not read very large files to sniff
+SNIFF_HEAD = 4096                   # a declaration appears near the top or not at all
 
 # A dumped body that the API withheld. Managed-package classes come back like
 # this, and counting them separately is the difference between "no findings"
@@ -1521,6 +1547,11 @@ class ScanStats:
     files_empty: int = 0
     files_unreadable: int = 0
     files_parse_errors: int = 0
+    files_by_extension: int = 0
+    files_by_content_sniff: int = 0
+    files_skipped_non_apex: int = 0
+    extensions_present: dict = field(default_factory=dict)
+    sniffed_files: list[str] = field(default_factory=list)
     hidden_files: list[str] = field(default_factory=list)
     empty_files: list[str] = field(default_factory=list)
     unreadable_files: list[dict] = field(default_factory=list)
@@ -1531,16 +1562,29 @@ class ScanStats:
 
 
 class Scanner:
-    def __init__(self, rules: Sequence[Rule] | None = None):
+    def __init__(self, rules: Sequence[Rule] | None = None,
+                 extra_extensions: Iterable[str] | None = None,
+                 sniff: bool = True):
         self.rules = list(rules or ALL_RULES)
+        self.extensions = set(APEX_EXTENSIONS)
+        for e in (extra_extensions or []):
+            e = e if e.startswith(".") else "." + e
+            self.extensions.add(e.lower())
+        self.sniff = sniff
 
     def scan_dir(self, root: str) -> tuple[list[Finding], list[EntryPoint], ScanStats]:
         stats = ScanStats()
         findings: list[Finding] = []
         entries: list[EntryPoint] = []
-        for path in self._walk(root):
+        for path, how in self._walk(root, stats):
             stats.files_seen += 1
+            if how == "extension":
+                stats.files_by_extension += 1
+            else:
+                stats.files_by_content_sniff += 1
             rel = os.path.relpath(path, root)
+            if how == "sniff":
+                stats.sniffed_files.append(rel)
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
@@ -1622,16 +1666,58 @@ class Scanner:
             ))
         return out
 
-    @staticmethod
-    def _walk(root: str) -> Iterator[str]:
+    def _walk(self, root: str, stats: ScanStats) -> Iterator[tuple[str, str]]:
+        """Yield (path, how) for every candidate, recursing through the tree.
+
+        `how` is "extension" when the name matched, or "sniff" when the content
+        did. Sniffing exists because bulk API dumps frequently write class
+        bodies to files with no extension at all, and silently analysing nothing
+        is the worst possible response to that."""
         if os.path.isfile(root):
-            yield root
+            yield root, "extension"
             return
-        for dirpath, dirnames, filenames in sorted(os.walk(root)):
-            dirnames[:] = sorted(d for d in dirnames if d not in {".git", "node_modules"})
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames
+                                 if d not in {".git", "node_modules", "__pycache__", ".sfdx"})
             for fn in sorted(filenames):
-                if os.path.splitext(fn)[1].lower() in APEX_EXTENSIONS:
-                    yield os.path.join(dirpath, fn)
+                path = os.path.join(dirpath, fn)
+                ext = os.path.splitext(fn)[1].lower()
+                stats.extensions_present[ext or "(none)"] = \
+                    stats.extensions_present.get(ext or "(none)", 0) + 1
+
+                if ext in self.extensions:
+                    yield path, "extension"
+                    continue
+                # Salesforce metadata companions carry no Apex body.
+                if fn.endswith("-meta.xml"):
+                    stats.files_skipped_non_apex += 1
+                    continue
+                if not self.sniff or ext in BINARY_EXTENSIONS:
+                    stats.files_skipped_non_apex += 1
+                    continue
+                if self._looks_like_apex(path):
+                    yield path, "sniff"
+                else:
+                    stats.files_skipped_non_apex += 1
+            # os.walk order is not guaranteed; sort for deterministic output.
+            dirnames.sort()
+
+    @staticmethod
+    def _looks_like_apex(path: str) -> bool:
+        try:
+            if os.path.getsize(path) > SNIFF_MAX_BYTES:
+                return False
+            with open(path, "rb") as fh:
+                head = fh.read(SNIFF_HEAD)
+        except OSError:
+            return False
+        if b"\x00" in head:            # binary
+            return False
+        try:
+            text = head.decode("utf-8", errors="replace")
+        except Exception:
+            return False
+        return bool(APEX_SNIFF_RE.search(text))
 
 
 # --------------------------------------------------------------------------
@@ -1724,7 +1810,27 @@ def write_markdown(path: str, findings: list[Finding], entries: list[EntryPoint]
     L.append("| Empty files | %d |" % stats.files_empty)
     L.append("| Unreadable files | %d |" % stats.files_unreadable)
     L.append("| Files with parse warnings | %d |" % stats.files_parse_errors)
+    L.append("| Matched by extension | %d |" % stats.files_by_extension)
+    L.append("| Matched by content (no known extension) | %d |" % stats.files_by_content_sniff)
+    L.append("| Skipped as non-Apex | %d |" % stats.files_skipped_non_apex)
     L.append("")
+    if stats.files_by_content_sniff:
+        L.append("%d file(s) carried no recognised Apex extension and were included because "
+                 "their content parsed as an Apex class, trigger or Visualforce markup. Bulk "
+                 "API dumps often write bodies to extensionless files, so excluding them would "
+                 "silently understate coverage."
+                 % stats.files_by_content_sniff)
+        L.append("")
+        L.append("<details><summary>%d file(s) matched by content</summary>"
+                 % len(stats.sniffed_files))
+        L.append("")
+        for q in stats.sniffed_files[:200]:
+            L.append("- `%s`" % q)
+        if len(stats.sniffed_files) > 200:
+            L.append("- … and %d more" % (len(stats.sniffed_files) - 200))
+        L.append("")
+        L.append("</details>")
+        L.append("")
     if stats.files_hidden or stats.files_empty:
         L.append("%d of %d files could not be analysed because the dump contains no body "
                  "for them — managed-package classes are returned as `(hidden)`. **They are "
@@ -2145,6 +2251,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Drop findings below this confidence (default LOW = keep everything)")
     p.add_argument("--rules", default="",
                    help="Comma-separated rule ids to keep; prefix-matching allowed (e.g. APEX-SOQL)")
+    p.add_argument("--ext", action="append", default=[], metavar="EXT",
+                   help="Additional file extension to treat as Apex (repeatable, e.g. --ext .txt)")
+    p.add_argument("--no-sniff", action="store_true",
+                   help="Do not inspect the content of files with unknown extensions; "
+                        "match on extension only")
     p.add_argument("--self-test", action="store_true",
                    help="Validate the engine against built-in vulnerable/safe snippets")
     p.add_argument("--quiet", "-q", action="store_true", help="Only print errors")
@@ -2202,9 +2313,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     rules_filter = expand_rule_filter(args.rules)
     min_conf = args.min_confidence.upper()
 
-    scanner = Scanner()
+    scanner = Scanner(extra_extensions=args.ext, sniff=not args.no_sniff)
     findings, entries, stats = scanner.scan_dir(args.input)
     kept = filter_findings(findings, min_conf, rules_filter)
+
+    # Finding nothing is a result the user must not miss, so it goes to stderr
+    # even under --quiet, and it names the extensions that are actually there.
+    if stats.files_seen == 0:
+        print("No Apex files found under %s" % os.path.abspath(args.input), file=sys.stderr)
+        if stats.extensions_present:
+            print("Extensions present in that tree:", file=sys.stderr)
+            for ext, n in sorted(stats.extensions_present.items(),
+                                 key=lambda kv: (-kv[1], kv[0]))[:15]:
+                print("  %-14s %d file(s)" % (ext, n), file=sys.stderr)
+            print("Recognised without help: %s"
+                  % ", ".join(sorted(scanner.extensions)), file=sys.stderr)
+            print("Add one with --ext (e.g. --ext .txt). Content sniffing is %s."
+                  % ("off; drop --no-sniff to enable it" if args.no_sniff else
+                     "on, but none of these files parsed as Apex"), file=sys.stderr)
+        else:
+            print("The directory contains no files at all.", file=sys.stderr)
+        return 2
 
     os.makedirs(args.out, exist_ok=True)
 
@@ -2241,6 +2370,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     say("Scanned %d file(s): %d analysed, %d withheld as (hidden), %d empty, %d unreadable."
         % (stats.files_seen, stats.files_analysed, stats.files_hidden,
            stats.files_empty, stats.files_unreadable))
+    if stats.files_by_content_sniff:
+        say("%d file(s) had no recognised extension and were analysed because their "
+            "content parsed as Apex." % stats.files_by_content_sniff)
+    if stats.files_skipped_non_apex:
+        say("%d file(s) in the tree were skipped as non-Apex." % stats.files_skipped_non_apex)
     if stats.files_parse_errors:
         say("%d file(s) produced parse warnings; they were still analysed."
             % stats.files_parse_errors)

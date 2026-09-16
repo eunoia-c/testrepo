@@ -10,6 +10,41 @@ python3 apex_scan.py -i ./apex_dump -o ./results --min-confidence HIGH --rules A
 
 Outputs `results.json`, `results.csv` and `report.md` into `--out`.
 
+## Input discovery
+
+`--input` takes a **directory**, walked recursively — nested `classes/`,
+`triggers/`, `pages/` layouts are handled, and reported paths are relative to
+the input root. A single file also works.
+
+Files are picked up two ways:
+
+1. **By extension** — `.cls`, `.trigger`, `.page`, `.cmp`, `.component`, `.evt`,
+   `.apex`, `.apxc`, `.apxt`, `.app`, `.intf`, `.tokens`. Add more with
+   `--ext .dat` (repeatable).
+2. **By content** — a file with an unrecognised or absent extension is read and
+   analysed if it parses as an Apex class, trigger, interface, or Visualforce /
+   Aura markup. Bulk API dumps regularly write class bodies to `MyClass`,
+   `MyClass.txt` or `MyClass.json`, and quietly analysing none of them is the
+   worst available outcome. Disable with `--no-sniff`.
+
+Binary files, `*-meta.xml` companions, `.git`, `node_modules`, `__pycache__` and
+`.sfdx` are skipped without being read. The coverage table reports how many files
+matched each way and how many were skipped as non-Apex.
+
+**If nothing matches**, the tool exits 2 and prints — to stderr, even under
+`--quiet` — the extensions actually present in the tree with counts, the
+extensions it recognises, and how to widen the net:
+
+```
+No Apex files found under /path/to/dump
+Extensions present in that tree:
+  .csv           1 file(s)
+  .md            1 file(s)
+Recognised without help: .apex, .app, .apxc, ... .trigger
+Add one with --ext (e.g. --ext .txt). Content sniffing is on, but none of
+these files parsed as Apex.
+```
+
 ## Design
 
 **Precision over recall.** Three decisions follow from writing for a client report:

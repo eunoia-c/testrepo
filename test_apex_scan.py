@@ -571,6 +571,129 @@ public without sharing class Vuln {
 
 
 # --------------------------------------------------------------------------
+class TestDirectoryDiscovery(unittest.TestCase):
+    """--input must handle a whole tree, including the shapes bulk API dumps
+    actually produce: nested folders, and bodies written to files with no
+    recognised extension."""
+
+    APEX = """
+public without sharing class Sample {
+    @AuraEnabled
+    public static List<Account> f(String n) {
+        return Database.query('SELECT Id FROM Account WHERE N = ' + n);
+    }
+}"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmp, "dump")
+        self.out = os.path.join(self.tmp, "out")
+        for sub in ("classes", "triggers", os.path.join("nested", "deeper")):
+            os.makedirs(os.path.join(self.src, sub))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, rel, content):
+        full = os.path.join(self.src, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return full
+
+    def test_walks_nested_directories(self):
+        self._write("classes/A.cls", self.APEX)
+        self._write("triggers/B.trigger", "trigger B on Account (before insert) { }")
+        self._write("nested/deeper/C.cls", self.APEX)
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_seen, 3)
+        self.assertEqual(stats.files_analysed, 3)
+
+    def test_paths_are_relative_to_input_root(self):
+        self._write("nested/deeper/C.cls", self.APEX)
+        findings, _e, _s = A.Scanner().scan_dir(self.src)
+        self.assertTrue(findings)
+        self.assertTrue(all(not os.path.isabs(f.path) for f in findings))
+        self.assertIn(os.path.join("nested", "deeper", "C.cls"),
+                      {f.path for f in findings})
+
+    def test_extensionless_file_found_by_content(self):
+        self._write("classes/NoExtension", self.APEX)
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_by_content_sniff, 1)
+        self.assertEqual(stats.files_analysed, 1)
+        self.assertIn(os.path.join("classes", "NoExtension"), stats.sniffed_files)
+
+    def test_txt_dump_found_by_content(self):
+        self._write("classes/Dumped.txt", self.APEX)
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_analysed, 1)
+
+    def test_trigger_recognised_by_content(self):
+        self._write("t/Trig", "trigger MyTrig on Account (before insert) { }")
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_by_content_sniff, 1)
+
+    def test_visualforce_recognised_by_content(self):
+        self._write("p/Page", "<apex:page controller=\"X\"></apex:page>")
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_by_content_sniff, 1)
+
+    def test_non_apex_text_not_sniffed_in(self):
+        self._write("notes.md", "# just notes\nnothing to see")
+        self._write("data.csv", "a,b,c\n1,2,3")
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_seen, 0)
+        self.assertEqual(stats.files_skipped_non_apex, 2)
+
+    def test_binary_files_are_not_read(self):
+        with open(os.path.join(self.src, "logo.png"), "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_seen, 0)
+
+    def test_meta_xml_companions_skipped(self):
+        self._write("classes/A.cls", self.APEX)
+        self._write("classes/A.cls-meta.xml", "<?xml version='1.0'?><ApexClass/>")
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.files_seen, 1)
+
+    def test_no_sniff_falls_back_to_extension_only(self):
+        self._write("classes/NoExtension", self.APEX)
+        _f, _e, stats = A.Scanner(sniff=False).scan_dir(self.src)
+        self.assertEqual(stats.files_seen, 0)
+
+    def test_extra_extension_flag(self):
+        self._write("classes/Body.dat", self.APEX)
+        _f, _e, stats = A.Scanner(extra_extensions=[".dat"]).scan_dir(self.src)
+        self.assertEqual(stats.files_by_extension, 1)
+
+    def test_extension_histogram_recorded(self):
+        self._write("notes.md", "# notes")
+        self._write("classes/A.cls", self.APEX)
+        _f, _e, stats = A.Scanner().scan_dir(self.src)
+        self.assertEqual(stats.extensions_present.get(".md"), 1)
+        self.assertEqual(stats.extensions_present.get(".cls"), 1)
+
+    def test_single_file_input_still_works(self):
+        full = self._write("classes/A.cls", self.APEX)
+        _f, _e, stats = A.Scanner().scan_dir(full)
+        self.assertEqual(stats.files_analysed, 1)
+
+    def test_zero_matches_exits_two_and_explains(self):
+        self._write("notes.md", "# notes")
+        rc = A.main(["--input", self.src, "--out", self.out, "--quiet"])
+        self.assertEqual(rc, 2)
+
+    def test_directory_scan_is_deterministic(self):
+        self._write("classes/A.cls", self.APEX)
+        self._write("nested/deeper/C.cls", self.APEX)
+        a = [f.fingerprint for f in A.Scanner().scan_dir(self.src)[0]]
+        b = [f.fingerprint for f in A.Scanner().scan_dir(self.src)[0]]
+        self.assertEqual(a, b)
+
+
+# --------------------------------------------------------------------------
 class TestRedactionAcrossOutputs(unittest.TestCase):
     """The markdown report prints three lines of context either side of every
     finding. A credential on one of those lines leaked into the report even
