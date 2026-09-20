@@ -30,6 +30,7 @@ The installer puts the tested `js-recon` scripts there; they may also appear at
 | `extract_endpoints.py` | Endpoint inventory with authorization verdicts |
 | `find_secrets.py` | Credentials, API keys, JWTs, disclosures |
 | `dom_xss_scan.py` | DOM XSS source-to-sink candidates |
+| `find_hidden_params.py` | Parameter names from client code; flags those never sent |
 | `suggest_attacks.py` | Endpoint/parameter ranking with suggested tests |
 | `make_request.py` | Raw HTTP for Burp Repeater |
 | `gen_wordlist.py` | Fuzzing wordlists |

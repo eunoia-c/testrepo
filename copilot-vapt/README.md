@@ -124,6 +124,7 @@ treats them as captured evidence rather than source code to tidy up.
 | `/js-endpoints` | Recover the endpoint inventory with authorization verdicts; ingests Burp XML exports |
 | `/js-secrets` | Credentials, API keys, JWTs (decoded), source maps, internal hosts |
 | `/js-domxss` | DOM XSS source-to-sink candidates, ranked by evidence |
+| `/hidden-params` | Recover parameter names and flag those the interface never sends |
 | `/attack-surface` | Rank endpoints and parameters, suggest concrete tests |
 | `/burp-request` | Raw HTTP for Repeater, with the credential-stripped pair |
 | `/wordlist` | Fuzzing wordlists from the inventory |

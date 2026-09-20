@@ -58,6 +58,8 @@ def main():
     ap.add_argument("--burp-index", default=None)
     ap.add_argument("--secrets", default=None, help="secrets.json from find_secrets.py")
     ap.add_argument("--attacks", default=None, help="attacks.json from suggest_attacks.py")
+    ap.add_argument("--hidden-params", default=None,
+                    help="hidden_params.json from find_hidden_params.py")
     ap.add_argument("--out", default="js-recon-report.md")
     ap.add_argument("--target", default="the application under test",
                     help="Target name/scope as it should read in the report")
@@ -70,6 +72,7 @@ def main():
     burp = load(args.burp_index)
     sec = load(args.secrets)
     atk = load(args.attacks)
+    hp = load(args.hidden_params)
     obs = burp_lookup(burp)
 
     # Sections are numbered as they are emitted so that optional inputs can be
@@ -118,6 +121,9 @@ def main():
             st.get("confirmed", 0), st.get("probable", 0)))
     if atk:
         L.append("| Parameters matching an attack class | %d |" % len(atk.get("interesting_parameters", [])))
+    if hp:
+        c = hp.get("by_classification", {})
+        L.append("| Parameters never seen in traffic | %d |" % c.get("hidden", 0))
     if burp:
         L.append("| Requests observed in Burp export | %d |" % burp.get("item_count", 0))
     L.append("| `.axd` resource references | %d |" % len(inv.get("axd_references", [])))
@@ -294,6 +300,72 @@ def main():
                              len(other), ", ".join("`%s`" % o for o in other[:20])))
                 L.append("")
 
+    # --- Hidden parameters ------------------------------------------------
+    if hp and hp.get("parameters"):
+        section("Parameters the interface never sends")
+        by_cls: dict[str, list] = {}
+        for r in hp["parameters"]:
+            by_cls.setdefault(r["classification"], []).append(r)
+
+        if not hp.get("traffic_available"):
+            L.append("No proxy history was supplied, so these are simply every parameter "
+                     "name recovered from the client. Re-run `find_hidden_params.py` with "
+                     "`--burp-index` to separate the ones the interface never sends, which "
+                     "are the ones worth testing.")
+            L.append("")
+        else:
+            L.append("Recovered from the client code and cross-referenced against %d "
+                     "parameter name(s) seen in captured traffic. A name present in the "
+                     "bundle but absent from traffic is one no amount of clicking through "
+                     "the application would find."
+                     % hp.get("observed_parameter_count", 0))
+            L.append("")
+
+        blurbs = {
+            "hidden": ("Never sent by the interface",
+                       "The client knows these names but does not use them in captured "
+                       "traffic. Add each to a request the endpoint already accepts and "
+                       "check whether the value persists or changes behaviour."),
+            "response_only": ("Read from responses, never submitted",
+                              "The client receives these fields but never sends them. That "
+                              "is the classic mass-assignment shape: try submitting them on "
+                              "an update to an object you own and see whether the server "
+                              "binds them."),
+            "commented": ("Present only in comments",
+                          "Removed from the client but frequently still accepted by the "
+                          "server, and invisible to traffic capture by definition."),
+            "code": ("Recovered from client code", ""),
+        }
+        for cls in ("hidden", "response_only", "commented", "code"):
+            items = by_cls.get(cls)
+            if not items:
+                continue
+            title, note = blurbs[cls]
+            L.append("### %s (%d)" % (title, len(items)))
+            L.append("")
+            if note:
+                L.append(note)
+                L.append("")
+            L.append("| Parameter | Seen as | Files | First occurrence |")
+            L.append("| --- | --- | --- | --- |")
+            for r in items[:80]:
+                occ = r["occurrences"][0] if r["occurrences"] else {}
+                where = ("`%s:%s`" % (occ.get("file", "?"), occ.get("line", "?"))
+                         if occ.get("line") else "`%s`" % occ.get("file", "?"))
+                L.append("| `%s` | %s | %d | %s |" % (
+                    esc(r["name"]), esc(", ".join(r["kinds"])), r["file_count"], where))
+            if len(items) > 80:
+                L.append("")
+                L.append("_%d more in `%s`._" % (len(items) - 80,
+                                                 os.path.basename(args.hidden_params)))
+            L.append("")
+
+        L.append("Names are evidence that the client knows a parameter, not that the server "
+                 "reads it. Confirm each reaches server-side behaviour -- change it to "
+                 "something benign but different and look for any change in status, length, "
+                 "content or timing -- before spending payloads on it.")
+        L.append("")
+
     # --- DOM XSS ---------------------------------------------------------
     section("DOM-based XSS candidates")
     if not dom or not dom.get("findings"):
@@ -415,6 +487,9 @@ def main():
             st.get("confirmed", 0), st.get("probable", 0)))
     if atk:
         print("  %d parameters matched an attack class" % len(atk.get("interesting_parameters", [])))
+    if hp:
+        print("  %d parameters never seen in traffic"
+              % hp.get("by_classification", {}).get("hidden", 0))
     return 0
 
 

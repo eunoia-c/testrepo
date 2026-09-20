@@ -131,6 +131,33 @@ check "legacy-version contextual" \
   "$(atk "sum(1 for e in d['endpoints'] if 'legacy-version' in e['signals'] and '/v2/' in e['path'])")" "0"
 check "secret notes surfaced"    "$(atk "1 if any('alg=none' in n for n in d['secret_notes']) else 0")" "1"
 
+echo "== find_hidden_params =="
+python3 "$SKILL/scripts/find_hidden_params.py" "$FIX" --out "$WORK/params_nobrp.json" >/dev/null
+pn() { python3 -c "import json; d=json.load(open('$WORK/params_nobrp.json')); print($1)"; }
+check "runs without a burp index"   "$([ -f "$WORK/params_nobrp.json" ] && echo yes)" "yes"
+check "nothing called hidden without traffic" \
+  "$(pn "d['by_classification'].get('hidden',0)")" "0"
+check "all classified as code without traffic" \
+  "$(pn "1 if all(r['classification']=='code' for r in d['parameters']) else 0")" "1"
+check "query-string params recovered" \
+  "$(pn "1 if any(r['name']=='zip' for r in d['parameters']) else 0")" "1"
+check "header keys excluded from params" \
+  "$(pn "sum(1 for r in d['parameters'] if r['name'] in ('Content-Type','Authorization'))")" "0"
+
+python3 "$SKILL/scripts/find_hidden_params.py" "$FIX" --burp-index "$WORK/burp_index.json" \
+  --out "$WORK/params.json" --wordlist "$WORK/params.txt" >/dev/null
+ph() { python3 -c "import json; d=json.load(open('$WORK/params.json')); print($1)"; }
+check "traffic comparison enabled"  "$(ph "1 if d['traffic_available'] else 0")" "1"
+check "wordlist written"            "$([ -s "$WORK/params.txt" ] && echo yes)" "yes"
+check "classifications assigned" \
+  "$(ph "1 if any(r['classification']!='code' for r in d['parameters']) else 0")" "1"
+
+echo "== gen_report with hidden params =="
+python3 "$SKILL/scripts/gen_report.py" --endpoints "$WORK/endpoints.json" \
+  --hidden-params "$WORK/params.json" --target "Smoke" --out "$WORK/report_hp.md" >/dev/null
+check "hidden-params section rendered" \
+  "$(grep -c 'Parameters the interface never sends' "$WORK/report_hp.md")" "1"
+
 echo "== analyse_file (single-file briefing) =="
 python3 "$SKILL/scripts/analyse_file.py" "$FIX/config.js" --json --out "$WORK/single.json" >/dev/null
 af() { python3 -c "import json; d=json.load(open('$WORK/single.json')); print($1)"; }

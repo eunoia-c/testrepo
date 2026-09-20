@@ -37,6 +37,7 @@ saved .js/.axd files ───────────────────�
                         ┌──────────────────┬──────────────────┬───────────┤
                         ▼                  ▼                  ▼           │
                 gen_wordlist.py     make_request.py    suggest_attacks.py  │
+                                                    find_hidden_params.py │
                                                                │          │
 JS/HTML files ──> dom_xss_scan.py ──> domxss.json ─────────────┼──────────┤
                                                                │          ▼
@@ -237,12 +238,49 @@ does, or as a first look before deciding whether the full pipeline is warranted.
 Use the pipeline instead when the input is a directory or a Burp export, since
 the corpus-wide inventory and ranking are what matter there.
 
-### 9. The report
+### 9. Hidden parameters
+
+```bash
+python3 scripts/find_hidden_params.py ./js ./burp_js \
+    --burp-index burp_index.json --out hidden_params.json --wordlist params.txt
+```
+
+Endpoint discovery answers *what can I call*. This answers *what can I send* —
+where mass assignment, feature flags and forgotten debug switches live.
+
+The output that matters is not the full parameter list; it is the subset that
+exists in the bundle but never appears in captured traffic. Those are precisely
+the names no amount of clicking through the application will find, which is why
+this needs `--burp-index`: without traffic to compare against, nothing can
+honestly be called hidden and everything is reported as `code`.
+
+Classifications:
+
+| Class | Meaning |
+| --- | --- |
+| `hidden` | In the bundle, never sent — the deliverable |
+| `response_only` | Read off a response, never submitted — mass-assignment lead |
+| `commented` | Survives only in a comment; often still accepted server-side |
+| `observed` | The UI sends it; you already have it |
+
+Sources it mines: `URLSearchParams` and query-helper calls, `FormData.append`,
+query strings inside URL literals, object-literal keys inside `fetch`/`axios`/
+`$.ajax` payloads, fields read off response objects, and names left behind in
+comments.
+
+Two precision notes worth preserving if you edit the patterns. Keys inside a
+`headers: {}` block are excluded — reporting `Content-Type` as a hidden
+parameter makes the whole list look untrustworthy. And the comment pattern
+matches the name and separator only, looking ahead at the value: consuming the
+value meant `// legacy: overrideApproval=true` matched `legacy` and swallowed
+`overrideApproval`, losing the one name worth having.
+
+### 10. The report
 
 ```bash
 python3 scripts/gen_report.py --endpoints endpoints.json --domxss domxss.json \
-    --secrets secrets.json --attacks attacks.json --burp-index burp_index.json \
-    --target "Client name — app" --out report.md
+    --secrets secrets.json --attacks attacks.json --hidden-params hidden_params.json \
+    --burp-index burp_index.json --target "Client name — app" --out report.md
 ```
 
 Produces a Markdown report: summary, credentials and disclosures, authorization

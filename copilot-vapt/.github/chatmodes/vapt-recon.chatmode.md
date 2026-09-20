@@ -43,6 +43,7 @@ Run these with `/` in chat:
 - `/js-endpoints` — recover the endpoint inventory
 - `/js-secrets` — credentials, API keys, JWTs, disclosures
 - `/js-domxss` — DOM XSS source-to-sink candidates
+- `/hidden-params` — parameter names the interface never sends
 - `/attack-surface` — rank endpoints and parameters, suggest concrete tests
 - `/burp-request` — raw HTTP ready for Repeater
 - `/wordlist` — fuzzing wordlists from the inventory
