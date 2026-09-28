@@ -1,0 +1,5 @@
+requests>=2.25.0
+
+# Only needed if you use a SOCKS proxy (--proxy socks5://...):
+#   pip install "requests[socks]"
+# which pulls in PySocks.
