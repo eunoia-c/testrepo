@@ -97,8 +97,14 @@ Assertions on request format, status classification and hint basis are taken fro
 the Go implementation's own test suite, so a divergence between the port and the
 original fails here rather than in a client report.
 
-Verified beyond unit tests, against a mock ServiceNow instance over TLS whose
-handlers reject requests with a wrong token or missing cookie:
+```bash
+bash tests/run_integration.sh          # end-to-end, no real target contacted
+```
+
+`tests/mock_servicenow.py` serves the response shapes the Go implementation
+expects, over TLS, and rejects any request whose `X-UserToken` or session cookie
+is wrong — so a passing run proves the headers actually go out correctly, which
+the fake-client unit tests cannot. It checks:
 
 - session bootstrap, token and cookie replay
 - exposed widget with samples, and count-oracle detection
@@ -111,8 +117,32 @@ handlers reject requests with a wrong token or missing cookie:
 
 ## What has not been verified
 
-**It has never run against a real ServiceNow instance.** The mock is my own
-construction from the original's source, so it reproduces the request/response
-shapes the Go code expects — not necessarily what a real Zurich or Yokohama
-instance returns. Before using this on an engagement, run both tools against the
-same authorised host and diff the JSON. If they disagree, the Go tool is right.
+**It has never run against a real ServiceNow instance.** The mock is reconstructed
+from the original's source, so it reproduces the request/response shapes the Go
+code *expects* — not necessarily what a real Zurich or Yokohama instance returns.
+
+### Validating against a real instance
+
+Use a **Personal Developer Instance**: free from `developer.servicenow.com`,
+provisioned on the current release, and yours — so authorisation is unambiguous
+and you are not pointing an unproven scanner at a client during an engagement.
+
+```bash
+python3 snowpick.py --target devNNNNN.service-now.com     --rate 500ms --samples 3 --fingerprint --table-api     --output pdi-baseline.json
+```
+
+`--rate 500ms` on the first run: it is a shared instance and there is no reason
+to be fast while you are establishing whether the tool behaves at all.
+
+Two things to read from the result. Does the version tag report `Zurich`, which
+confirms `stats.do` parsing and release inference against real output? And do the
+findings look structurally sane — populated `evidence_fields`, working curl
+reproductions, oracle hints where counts came back without rows?
+
+A fresh PDI ships demo data under default ACLs, so it may legitimately show
+exposure. That is a functional signal about the tool, **not** a finding about
+ServiceNow's security, and it should not go in a report.
+
+If anything looks wrong — empty evidence where records were returned, a version
+that will not parse, a request the instance rejects — send the JSON and it can be
+corrected against real behaviour rather than against my reconstruction.
