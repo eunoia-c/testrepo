@@ -2,5 +2,6 @@
 __pycache__/
 *.py[cod]
 
-# apex_scan.py default output directory
-/results/
+# Scanner output directories (apex_scan.py --out, snowpick --output)
+results/
+*.results.json

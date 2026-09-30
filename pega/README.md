@@ -1,11 +1,11 @@
 # Pega Infinity path wordlist
 
-`pega-paths.txt` — content-discovery wordlist for Pega Platform / Infinity web
+`wordlists/pega-paths.txt` — content-discovery wordlist for Pega Platform / Infinity web
 deployments. For use in authorized security testing only.
 
 No leading slashes, so it drops straight into a fuzzer:
 
-    ffuf -w wordlists/pega-paths.txt -u https://TARGET/FUZZ -ac
+    ffuf -w pega/wordlists/pega-paths.txt -u https://TARGET/FUZZ -ac
 
 ## Coverage
 

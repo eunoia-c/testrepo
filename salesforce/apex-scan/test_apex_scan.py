@@ -2,7 +2,7 @@
 """Unit tests for apex_scan.py.
 
 Run: python3 -m unittest -v test_apex_scan
-     python3 test_apex_scan.py
+     python3 test_apex_scan.py      (run from salesforce/apex-scan/)
 
 The emphasis is on the properties that make the tool safe to report from:
 comments and literals cannot produce hits, redaction never leaks a value,

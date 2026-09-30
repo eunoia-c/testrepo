@@ -1,11 +1,11 @@
-# apex_scan.py
+# apex-scan — Salesforce Apex static analysis
 
 Static analysis for Salesforce Apex dumped by `aura-dump`. Stdlib-only, Python 3.11+.
 
 ```bash
-python3 apex_scan.py --input ./apex_dump --out ./results --format json,csv,md
-python3 apex_scan.py --self-test          # validate the engine, print nothing else
-python3 apex_scan.py -i ./apex_dump -o ./results --min-confidence HIGH --rules APEX-SOQL
+python3 salesforce/apex-scan/apex_scan.py --input ./apex_dump --out ./results --format json,csv,md
+python3 salesforce/apex-scan/apex_scan.py --self-test          # validate the engine, print nothing else
+python3 salesforce/apex-scan/apex_scan.py -i ./apex_dump -o ./results --min-confidence HIGH --rules APEX-SOQL
 ```
 
 Outputs `results.json`, `results.csv` and `report.md` into `--out`.
@@ -164,7 +164,7 @@ stays silent on the safe one. When run alongside a scan, the result is written
 into `report.md` under **Checker validation** so the report can state the checker
 was validated, with the assertion count.
 
-`python3 -m unittest test_apex_scan` runs 80 unit tests covering preprocessing,
+`python3 -m unittest test_apex_scan` (from this directory) runs 80 unit tests covering preprocessing,
 parsing, every rule, redaction across all three output formats, robustness
 against malformed input, fingerprint stability, and the CLI.
 
@@ -184,3 +184,13 @@ State these rather than let them be assumed away:
   format is missed; a high-entropy non-credential can appear at LOW confidence.
 - **Findings are candidates.** Every one should be confirmed against the org
   before it is presented as exploitable.
+
+## Where this lives
+
+Run it from the repository root with the paths above, or `cd salesforce/apex-scan`
+and use the bare `apex_scan.py` form. The tests import the module directly, so
+they must be run from this directory:
+
+```bash
+cd salesforce/apex-scan && python3 -m unittest test_apex_scan
+```
