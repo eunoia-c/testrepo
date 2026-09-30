@@ -69,11 +69,11 @@ The port preserves the things that would make output incomparable if they drifte
 
 ### Deliberate differences
 
-- **`requests` instead of a hand-rolled client.** An earlier draft of this port
-  used only the standard library, on the assumption that an environment blocking
-  the Go proxy might block PyPI too. It doesn't here, and `requests` is the right
-  call: hand-written HTTP parsing is exactly where a scanner silently
-  misreports.
+- **`requests` instead of a hand-rolled client.** A standard-library-only
+  transport is possible, and was tried, but hand-written HTTP parsing is exactly
+  where a scanner silently misreports. If an environment blocks PyPI as well as
+  the Go proxy, that trade-off is worth revisiting deliberately rather than by
+  default.
 - **One `requests.Session` per thread.** `requests.Session` is not documented as
   thread-safe and this scanner probes tables concurrently. Per-thread sessions
   keep connection pooling without shared mutable state.
@@ -144,5 +144,6 @@ exposure. That is a functional signal about the tool, **not** a finding about
 ServiceNow's security, and it should not go in a report.
 
 If anything looks wrong — empty evidence where records were returned, a version
-that will not parse, a request the instance rejects — send the JSON and it can be
-corrected against real behaviour rather than against my reconstruction.
+that will not parse, a request the instance rejects — that is a divergence between
+this port and real instance behaviour, and the fix belongs in the port rather
+than in the interpretation of its output.

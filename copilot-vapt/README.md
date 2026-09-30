@@ -14,29 +14,9 @@ scripts, so downloading `copilot-vapt/` alone is enough — no clone, no pull.
 
 ## Getting it without git
 
-GitHub has no per-folder download, so grab the repository ZIP and keep this
-folder:
-
-```
-https://github.com/eunoia-c/testrepo/archive/refs/heads/claude/pegasystems-cve-research-q1cwjq.zip
-```
-
-Extract it, and everything you need is under `copilot-vapt/`. The rest of the
-repository can be deleted.
-
-**This repository is private**, so that URL is not anonymously downloadable — a
-browser session already signed in to an account with access will work, but a
-bare `curl` or `wget` will get a 404 rather than an auth prompt. To fetch it
-non-interactively, pass a token:
-
-```bash
-curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -o repo.zip \
-  https://api.github.com/repos/eunoia-c/testrepo/zipball/claude/pegasystems-cve-research-q1cwjq
-```
-
-See [`../docs/github-access.md`](../docs/github-access.md) for scoping that
-token to this repository only.
+GitHub has no per-folder download, so grab the repository ZIP from the branch you
+want and keep this folder. Extract it, and everything you need is under
+`copilot-vapt/` — the rest of the repository can be deleted.
 
 ## Install
 

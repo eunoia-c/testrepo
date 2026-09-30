@@ -15,7 +15,6 @@ the top level.
 | [`salesforce/apex-scan/`](salesforce/apex-scan/) | Apex static analysis: SOQL injection taint checker, secrets, sharing/CRUD-FLS, crypto, callouts | Salesforce |
 | [`servicenow/snowpick/`](servicenow/snowpick/) | ServiceNow exposure scanner — Python port of BishopFox/snowpick | ServiceNow |
 | [`pega/`](pega/) | Pega Infinity content-discovery wordlist and notes | Pega |
-| [`docs/`](docs/) | Repository documentation, including [authenticated access](docs/github-access.md) | — |
 
 ## Quick start
 
