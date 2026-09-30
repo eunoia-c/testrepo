@@ -109,9 +109,49 @@ is wrong — ask whoever manages the proxy for it.
 
 ## If policy blocks git entirely
 
-You can still work from a ZIP: `github.com/<owner>/<repo>/archive/refs/heads/<branch>.zip`.
-You lose history and the ability to push, so treat it as read-only and note that
+You can still work from a ZIP. **This repository is private**, so the plain
+`archive/refs/heads/<branch>.zip` URL only works from a browser already signed in
+with access; unauthenticated it returns 404, not an auth prompt. Non-interactively:
+
+```bash
+curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -o repo.zip \
+  https://api.github.com/repos/<owner>/<repo>/zipball/<branch>
+```
+
+You lose history and the ability to push, so treat it as read-only. Note that
 `copilot-vapt/` is designed to be usable from a ZIP on its own.
+
+## This repository is private
+
+Deliberately — it holds security tooling, a target-specific wordlist and
+engagement notes. Three consequences worth knowing:
+
+**Secret-scanning push protection may no longer apply.** GitHub provides secret
+scanning and push protection free on *public* repositories; on private ones it
+requires GitHub Secret Protection (previously bundled with Advanced Security),
+which is a paid add-on. That protection is not cosmetic here — it blocked a push
+during this repository's own history when a test fixture contained a
+provider-format API key. Check Settings → Code security after changing
+visibility, and if push protection is off, compensate:
+
+- Run the repository's own secret scanner before committing:
+  `python3 copilot-vapt/scripts/find_secrets.py . --min-tier probable`
+- Keep the existing convention of assembling fixture credentials from fragments
+  at run time (`salesforce/apex-scan/` and `servicenow/snowpick/` both do this)
+  rather than storing anything provider-shaped.
+
+**Going private does not retract what was already public.** Clones, forks and
+caches made while the repository was public still exist, and search engines and
+code-search services may have indexed it. Anything committed before the change
+should be treated as disclosed. If any of it was genuinely sensitive — a real
+credential, a client-identifying hostname — rotate or remove it at the source
+rather than relying on the visibility change.
+
+**Everyone who needs it now needs explicit access.** Add collaborators under
+Settings → Collaborators, or grant a team if the repository moves to an
+organisation. Tokens must be scoped to include it, and CI or automation using an
+anonymous clone will start failing.
 
 Where this session's own GitHub access is the problem instead — a clone, read or
 push failing from inside Claude Code — reconnect the account at
@@ -125,8 +165,6 @@ Not authentication, but adjacent, and neither is set on this repository today:
 
 - **Branch protection** on the default branch — require a pull request, and
   require the test suites to pass. Configured under Settings → Branches.
-- **Visibility.** This repository holds security tooling and engagement notes.
-  If it is public, that is worth a deliberate decision rather than a default.
 - **`CODEOWNERS`** if more than one person will review changes.
 
 Say the word if you want any of those set up; they need repository-settings
