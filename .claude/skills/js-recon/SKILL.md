@@ -172,6 +172,12 @@ Use `--redact` whenever output will reach anyone who should not hold live
 credentials. And if a confirmed credential turns out to be live, that is not a
 routine report row — tell the client when you find it.
 
+A detected format tells you nothing about *scope*, and scope is what decides
+whether a hit is a finding at all: `pk_live_…`, `AIzaSy…`, `G-…` and `phc_…`
+belong in client code by design. `analyse_file.py` annotates single-file output
+with that distinction (section 8); when working from `find_secrets.py` alone,
+make the call yourself before writing a row.
+
 ### 7. Interesting parameters and suggested attacks
 
 ```bash
@@ -213,9 +219,10 @@ python3 scripts/analyse_file.py app.js --json --out app-analysis.json
 For "here is one file, what can you tell me about it" — a different question
 from "what is the whole attack surface", and it deserves a different answer.
 Prints a briefing rather than JSON: what the file *is* first, then libraries and
-versions, endpoints, secrets, DOM XSS, and a **What stands out** section.
+versions, feature flags, endpoints, secrets with scope, DOM XSS, and a **What
+stands out** section.
 
-Two things it adds over running the other scripts separately:
+Four things it adds over running the other scripts separately:
 
 **Fingerprinting.** Bundler, framework, and third-party library versions,
 checked against a short list of well-known advisories (jQuery below 3.5,
@@ -227,11 +234,74 @@ costs more credibility than a missing one. Always confirm the version actually
 loaded at runtime, since bundles frequently ship a version string that a shim
 then replaces.
 
+**Feature flags and client config.** Providers (LaunchDarkly, Split,
+Optimizely, Unleash, Flagsmith, GrowthBook, ConfigCat), `window.__APP_CONFIG__`
+style blobs, and boolean flag assignments — including minified `!0`/`!1`, which
+is how they almost always appear in a production bundle. The output splits them
+into **off in this build** and **on**, and the off half is the point: a flag
+that is false is a feature the UI will not show you, and the route behind it is
+frequently still mounted server-side. Flag names are filtered against a noise
+list (`isArray`, `isNaN` and friends) because `is`-prefixed library internals
+otherwise swamp the real ones.
+
+The join that makes this worth having is `flag_gated_endpoints()`: flags that
+are **off** matched against endpoint paths that mention them. "`enableAdminPanel`
+is false and `POST /api/v2/admin/bulk-export` shows no authorization evidence"
+is a lead; either half alone is not. Treat a disabled flag as a *hint about
+where to look*, never as proof the route is live — confirm by calling it.
+
+**API key scope, not just key shape.** The secrets section annotates each
+finding with what the key actually grants, keyed on the detected provider
+format. This exists because shape-based detection produces a dangerous false
+symmetry: `pk_live_…` and `sk_live_…` look equally alarming to a regex and are
+not remotely equal. A publishable key, a Google Maps browser key, a Firebase
+`AIzaSy…`, a GA measurement ID and a PostHog `phc_` key all belong in client
+code by design, and reporting them as leaked credentials is the fastest way to
+lose a client's trust in the rest of the report. The scope note says which side
+of that line a finding falls on: `critical` (server-side secret in client code),
+`depends` (a key whose risk is entirely about its referrer/IP restrictions —
+Google API keys especially, where the real test is whether the restriction is
+set), or by-design public. By-design-public formats are listed under a
+`public` label and kept out of the credential tally, because "8 credentials
+found" where six are publishable keys is the kind of number that gets a whole
+report dismissed. They are still printed with their scope note, since a Google
+key with no referrer restriction is a real finding — check, do not assume.
+
 **Cross-cutting observations.** A token in web storage is unremarkable; an
 `innerHTML` sink is unremarkable; both in one file is a session-theft chain.
 Admin paths in a bundle served to everyone, endpoints spanning two API versions,
-a referenced source map — these joins are the whole reason to look at a file as
-a unit, and they are what someone actually wants when they hand you one file.
+a referenced source map, a flag-gated route with no auth evidence — these joins
+are the whole reason to look at a file as a unit, and they are what someone
+actually wants when they hand you one file.
+
+#### The read-through pass (do not skip this)
+
+The script is regex-and-heuristic, and regexes recover *that* something exists,
+never *what it means*. The inventory is the setup; the value is reading the code
+it points at. After running it, open the file at the reported lines and answer
+the questions the patterns cannot:
+
+- **What actually gates this endpoint?** `auth: none` means no token was visible
+  in the call's own span. Read outward: is the call behind a route guard, inside
+  a module only loaded after login, wrapped by an interceptor that adds the
+  header globally? A global `axios` interceptor makes every per-call verdict in
+  the inventory wrong in the same direction.
+- **What does this flag turn on?** Follow the flag name to its consumers. A flag
+  that only swaps a CSS class is noise; one that selects a different request
+  path, a different endpoint, or an admin component is the find. The script
+  cannot tell these apart — reading five lines can.
+- **What validation does this parameter get, and where?** Client-side
+  validation adjacent to a parameter is a strong hint the server trusts it.
+  Note the constraint, then test whether the server re-checks it.
+- **What is this key for?** The scope annotation is based on format. Confirm by
+  reading the call it is used in: which API, which host, which operation.
+- **What is this code path for?** Dead-looking admin or debug code in a
+  user-facing bundle is a statement about what the backend still exposes.
+
+Write the findings up from *these* answers, with the script's `file:line` as
+the citation. A report that says "regex found 40 endpoints" is worth much less
+than one that says "this endpoint is reachable without the admin role because
+the only check is a client-side flag, at `app.js:1204`."
 
 Reach for this when the input is one file, when someone asks what a file is or
 does, or as a first look before deciding whether the full pipeline is warranted.

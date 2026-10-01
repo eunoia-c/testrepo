@@ -33,8 +33,12 @@ def compare(src, dst, label):
     """Return (missing, differing, extra) filenames."""
     if not os.path.isdir(src):
         return None
-    src_files = {f for f in os.listdir(src) if not f.startswith(".")}
-    dst_files = set(os.listdir(dst)) if os.path.isdir(dst) else set()
+    # Directories are skipped, not just dotfiles: importing these scripts from a
+    # test leaves a __pycache__ behind, and a stray directory used to abort the
+    # copy partway through.
+    src_files = {f for f in os.listdir(src) if _copyable(src, f)}
+    dst_files = ({f for f in os.listdir(dst) if _copyable(dst, f)}
+                 if os.path.isdir(dst) else set())
     missing = sorted(src_files - dst_files)
     extra = sorted(dst_files - src_files)
     differing = sorted(
@@ -44,10 +48,14 @@ def compare(src, dst, label):
     return missing, differing, extra
 
 
+def _copyable(d, name):
+    return not name.startswith(".") and os.path.isfile(os.path.join(d, name))
+
+
 def sync(src, dst):
     os.makedirs(dst, exist_ok=True)
     for f in os.listdir(src):
-        if f.startswith("."):
+        if not _copyable(src, f):
             continue
         shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
 

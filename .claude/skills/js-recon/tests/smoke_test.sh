@@ -19,6 +19,8 @@ trap 'rm -rf "$WORK"' EXIT
 FIX="$WORK/fixtures"
 mkdir -p "$FIX"
 cp "$HERE"/fixtures/app.js "$HERE"/fixtures/page.html "$HERE"/fixtures/burp_export.xml "$FIX"/
+# flags.js stays out of $FIX: it would change every corpus-wide count below.
+FLAGS="$HERE/fixtures/flags.js"
 python3 "$HERE/fixtures/make_secrets_fixture.py" "$FIX/config.js"
 
 fail=0
@@ -169,6 +171,23 @@ python3 "$SKILL/scripts/analyse_file.py" "$FIX/app.js" > "$WORK/brief.txt"
 check "briefing has WHAT THIS FILE IS" "$(grep -c '^WHAT THIS FILE IS' "$WORK/brief.txt")" "1"
 check "briefing has WHAT STANDS OUT"   "$(grep -c '^WHAT STANDS OUT' "$WORK/brief.txt")" "1"
 check "briefing states the caveat"     "$(grep -c 'not about server-side' "$WORK/brief.txt")" "1"
+
+# Feature flags and key scope: the two context questions a pattern match cannot
+# answer on its own -- which features are built but switched off, and whether a
+# secret-shaped string is actually a secret.
+python3 "$SKILL/scripts/analyse_file.py" "$FLAGS" --json --out "$WORK/flags.json" >/dev/null
+fl() { python3 -c "import json; d=json.load(open('$WORK/flags.json')); print($1)"; }
+check "flag provider detected"    "$(fl "'LaunchDarkly' in d['feature_flags']['providers']")" "True"
+check "config blob detected"      "$(fl "'__APP_CONFIG__' in d['feature_flags']['config_objects']")" "True"
+check "minified !1 read as false" "$(fl "next(f['default'] for f in d['feature_flags']['flags'] if f['name']=='enableAdminPanel')")" "False"
+check "minified !0 read as true"  "$(fl "next(f['default'] for f in d['feature_flags']['flags'] if f['name']=='showBetaDashboard')")" "True"
+check "library internals filtered" "$(fl "any(f['name'] in ('isArray','isNaN') for f in d['feature_flags']['flags'])")" "False"
+check "off flag joined to endpoint" "$(fl "1 if any('feature flag that is OFF' in o for o in d['observations']) else 0")" "1"
+
+python3 "$SKILL/scripts/analyse_file.py" "$FIX/config.js" > "$WORK/scope.txt"
+check "scope annotated on secrets" "$(grep -c 'scope \[critical\]' "$WORK/scope.txt")" "4"
+check "google key marked public"   "$(grep -c '^  public     google-api-key' "$WORK/scope.txt")" "1"
+check "public key not in tally"    "$(af "sum(1 for f in d['secrets'] if f['tier']=='confirmed' and f['by_design_public'])")" "1"
 
 echo "== gen_report =="
 python3 "$SKILL/scripts/gen_report.py" --endpoints "$WORK/endpoints.json" \

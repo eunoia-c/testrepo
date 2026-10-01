@@ -86,6 +86,148 @@ KNOWN_ADVISORIES = [
 
 NOISE_NAMES = {"the", "this", "license", "copyright", "version", "js", "min", "eslint", "prettier"}
 
+# ---------------------------------------------------- feature flags and config
+#
+# A regex inventory of endpoints answers "what can I call". It does not answer
+# "what is switched off in this build" -- and a flag defaulting to false is a
+# feature whose UI is hidden while its server-side endpoints are frequently
+# already live and unprotected. Flipping the flag in the browser is a one-line
+# change; the endpoints behind it are the actual finding.
+
+FLAG_PROVIDERS = [
+    ("LaunchDarkly", re.compile(r"launchdarkly|LDClient|ldclient", re.I)),
+    ("Split.io", re.compile(r"splitio|SplitFactory|getTreatment\s*\(", re.I)),
+    ("Optimizely", re.compile(r"optimizely", re.I)),
+    ("Unleash", re.compile(r"unleash", re.I)),
+    ("GrowthBook", re.compile(r"growthbook", re.I)),
+    ("Flagsmith", re.compile(r"flagsmith", re.I)),
+    ("ConfigCat", re.compile(r"configcat", re.I)),
+    ("Statsig", re.compile(r"statsig", re.I)),
+    ("PostHog flags", re.compile(r"isFeatureEnabled\s*\(|posthog", re.I)),
+]
+
+# `!0` and `!1` are what minifiers emit for true and false, so a bundle's flags
+# are invisible without them.
+FLAG_ASSIGN_RE = re.compile(
+    r"""["']?(?P<name>
+          (?:enable|disable|allow|show|hide|use|is|has|can|should)[A-Z][\w$]{2,40}
+        | [A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+){1,6}
+        | [\w$]*(?:[Ff]lag|[Tt]oggle|[Ff]eature|[Ee]xperiment|[Bb]eta|[Rr]ollout)[\w$]*
+        )["']?\s*[:=]\s*(?P<value>true|false|!0|!1)(?![\w$])""",
+    re.X)
+
+CONFIG_BLOB_RE = re.compile(
+    r"(?:window|globalThis|self)\s*\.\s*(?P<name>__[A-Z_]+__|[A-Z][A-Z0-9_]{2,40}|"
+    r"(?:app|site|env|runtime|client)Config)\s*=\s*\{", re.I)
+
+FLAG_NAME_NOISE = {"true", "false", "isarray", "isnan", "isinteger", "isfinite",
+                   "isprototypeof", "hasownproperty", "useState", "useEffect",
+                   "useMemo", "useRef", "useCallback", "isview", "isbuffer"}
+
+
+def normalise_bool(raw: str) -> bool:
+    return raw in ("true", "!0")
+
+
+def feature_flags(text):
+    """(providers, flags) where flags is [(name, default_bool, line_hint)]."""
+    providers = [name for name, pat in FLAG_PROVIDERS if pat.search(text)]
+    flags: dict[str, bool] = {}
+    for m in FLAG_ASSIGN_RE.finditer(text):
+        name = m.group("name")
+        if name.lower() in FLAG_NAME_NOISE or len(name) < 4:
+            continue
+        # First definition wins; a later override is usually test setup.
+        flags.setdefault(name, normalise_bool(m.group("value")))
+    configs = sorted({m.group("name") for m in CONFIG_BLOB_RE.finditer(text)})
+    return providers, flags, configs
+
+
+# ------------------------------------------------------------- key scope
+#
+# Detecting a key is half the job. What it grants decides whether it is a
+# finding at all: a Stripe publishable key is *designed* to sit in client code,
+# while a secret key beside it is an incident. Scope is the part a format match
+# cannot tell you, so it is stated per provider rather than assumed.
+
+KEY_SCOPE = {
+    "aws-access-key-id": (
+        "critical",
+        "Long-lived IAM credentials. Permissions come entirely from the attached "
+        "policy, so confirm with sts:GetCallerIdentity and check what it actually "
+        "reaches rather than assuming either way."),
+    "google-api-key": (
+        "depends",
+        "Scope is set by the key's API and HTTP-referrer restrictions in GCP, not by "
+        "the key string. An unrestricted key means billable abuse and sometimes data "
+        "access; a referrer-locked Maps key in client code is by design and is not a "
+        "finding. Check the restrictions before reporting."),
+    "google-oauth-client-id": (
+        "low",
+        "A public client identifier, intended to be visible. Interesting only for "
+        "the redirect-URI configuration it points at."),
+    "github-token": (
+        "depends",
+        "A fine-grained token may be read-only on one repository; a classic token "
+        "with `repo` scope grants write to every repository the user can reach. The "
+        "scope is not visible in the token string -- check /user and the "
+        "X-OAuth-Scopes response header."),
+    "github-fine-grained-pat": (
+        "depends",
+        "Scoped per repository and per permission at creation. Enumerate before "
+        "assuming reach."),
+    "gitlab-token": ("depends", "Scope is set at creation and not visible in the token."),
+    "slack-token": (
+        "high",
+        "xoxb is a bot token, xoxp a user token carrying that user's access. Either "
+        "reads channel history where the workspace permits it; auth.test identifies "
+        "which."),
+    "slack-webhook": (
+        "medium",
+        "Post-only into one channel. Not a read primitive -- useful for spoofing "
+        "internal messages, not for extraction."),
+    "stripe-secret-key": (
+        "critical",
+        "A secret server key must never reach client code. Note the contrast: a pk_ "
+        "publishable key in the same bundle is by design and is not a finding."),
+    "stripe-test-key": (
+        "medium",
+        "Test-mode key: no live money or customer data. Report as hygiene, and check "
+        "whether the live equivalent is built the same way."),
+    "twilio-api-key": ("high", "Can send messages and read logs that may contain OTPs."),
+    "twilio-account-sid": (
+        "low", "An account identifier, not a credential. Only useful paired with a token."),
+    "sendgrid-key": ("high", "Send-as-the-domain, and often read access to suppression data."),
+    "openai-key": ("high", "Billable, and usable against any model the account can reach."),
+    "anthropic-key": ("high", "Billable, and usable against any model the account can reach."),
+    "mapbox-secret-token": (
+        "high", "An sk. token is a secret token, unlike the pk. form that belongs in clients."),
+    "private-key-block": (
+        "critical",
+        "A private key delivered to clients is compromised by definition, whatever "
+        "it signs."),
+    "azure-storage-key": ("critical", "Full control of the storage account."),
+    "basic-auth-in-url": ("critical", "Credentials in a URL, also logged by every proxy in the path."),
+    "db-connection-string": ("critical", "Direct database credentials."),
+    "dotnet-connection-string": ("critical", "Direct database credentials."),
+    "firebase-cloud-messaging": ("high", "Can push notifications to every app install."),
+    "jwt": (
+        "depends",
+        "The value is in the claims, not the token: subject, roles or scopes "
+        "asserted, and whether it has expired. Decode before judging."),
+}
+
+# Formats that belong in client code by design. They are still listed -- a
+# Google key with no referrer restriction is a real finding -- but they are kept
+# out of the credential tally, because "8 credentials found" where six are
+# publishable keys is the kind of number that gets a whole report dismissed.
+EXPECTED_PUBLIC = re.compile(
+    r"^(?:pk_(?:live|test)_|AIzaSy|G-[A-Z0-9]{8,}|UA-\d+-\d+|phc_)")
+
+
+def by_design_public(finding):
+    return bool(EXPECTED_PUBLIC.match(str(finding.get("value") or "")))
+
 
 def parse_version(v):
     parts = [int(x) for x in re.findall(r"\d+", v)[:3]]
@@ -150,6 +292,19 @@ def run_json(script, args):
             os.unlink(out)
 
 
+def _wrap(text, width):
+    out, line = [], ""
+    for word in text.split():
+        if len(line) + len(word) + 1 > width:
+            out.append(line)
+            line = word
+        else:
+            line = (line + " " + word).strip()
+    if line:
+        out.append(line)
+    return out
+
+
 def human_bytes(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -157,7 +312,35 @@ def human_bytes(n):
         n /= 1024.0
 
 
-def observations(meta, fp, eps, secrets, dom):
+def flag_gated_endpoints(flags, eps):
+    """Endpoints whose path echoes a flag that is off in this build.
+
+    This is the join worth making. A flag defaulting to false hides a feature in
+    the UI; it says nothing about whether the server-side route behind it is
+    deployed or protected. Where the names line up, the endpoint is reachable
+    now and the flag is only hiding the button."""
+    off = [n for n, v in (flags or {}).items() if not v]
+    if not off:
+        return []
+    pairs = []
+    for name in off:
+        # Split camelCase and SNAKE_CASE into words long enough to be meaningful.
+        words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|[0-9]+", name)
+                 if len(w) >= 4 and w.lower() not in
+                 ("enable", "disable", "allow", "show", "hide", "flag", "feature",
+                  "toggle", "rollout", "beta", "should")]
+        if not words:
+            continue
+        for e in (eps or {}).get("endpoints", []):
+            path = e["normalized"].lower()
+            if any(w in path for w in words):
+                pairs.append((name, e["method"], e["normalized"],
+                              e.get("auth", {}).get("verdict", "")))
+                break
+    return pairs
+
+
+def observations(meta, fp, eps, secrets, dom, flags=None):
     """Joins across the individual results. These are the reason to look at a
     file as a whole rather than at four separate reports."""
     out = []
@@ -201,6 +384,19 @@ def observations(meta, fp, eps, secrets, dom):
             "reconstructs the original source with comments and real names -- fetch "
             "it and re-run this analysis over the result before doing anything else.")
 
+    gated = flag_gated_endpoints(flags, eps)
+    if gated:
+        lines = ", ".join("%s -> %s %s" % (n, m, p) for n, m, p, _v in gated[:3])
+        unauth = [g for g in gated if g[3] in ("no_auth_indicator", "explicit_no_credentials")]
+        note = (" %d of them show no authorization evidence, so the route is reachable "
+                "now and the flag is only hiding the button." % len(unauth)) if unauth else ""
+        out.append(
+            "%d endpoint%s match a feature flag that is OFF in this build (%s).%s Flipping "
+            "a client-side flag is a one-line change in the browser; whether the "
+            "server-side route is deployed and protected is a separate question, and "
+            "this is where to ask it."
+            % (len(gated), "" if len(gated) == 1 else "s", lines, note))
+
     if advisories:
         out.append(
             "%d third-party librar%s below a version with published advisories. These "
@@ -208,7 +404,8 @@ def observations(meta, fp, eps, secrets, dom):
             "loaded at runtime before reporting."
             % (len(advisories), "y is" if len(advisories) == 1 else "ies are"))
 
-    confirmed = [f for f in (secrets or {}).get("findings", []) if f["tier"] == "confirmed"]
+    confirmed = [f for f in (secrets or {}).get("findings", [])
+                 if f["tier"] == "confirmed" and not by_design_public(f)]
     if confirmed:
         out.append(
             "%d credential%s in provider-specific format. Establish whether each is "
@@ -246,6 +443,7 @@ def main():
     meta = characterise(args.path, text)
     fp = fingerprint(text)
     bundlers, frameworks, versions, advisories = fp
+    providers, flags, configs = feature_flags(text)
 
     eps, e_err = run_json("extract_endpoints.py", [args.path])
     secrets, s_err = run_json("find_secrets.py", [args.path, "--min-tier", "info"])
@@ -257,13 +455,17 @@ def main():
             "characteristics": meta,
             "bundlers": bundlers, "frameworks": frameworks,
             "library_versions": {k: sorted(v) for k, v in versions.items()},
+            "feature_flags": {"providers": providers,
+                              "flags": [{"name": n, "default": v} for n, v in sorted(flags.items())],
+                              "config_objects": configs},
             "advisories": [{"library": a, "version": b, "fixed_in": c, "issue": d}
                            for a, b, c, d in advisories],
             "endpoints": (eps or {}).get("endpoints", []),
             "global_auth_mechanisms": (eps or {}).get("global_auth_mechanisms", []),
-            "secrets": (secrets or {}).get("findings", []),
+            "secrets": [dict(f, by_design_public=by_design_public(f))
+                        for f in (secrets or {}).get("findings", [])],
             "dom_xss": (dom or {}).get("findings", []),
-            "observations": observations(meta, fp, eps, secrets, dom),
+            "observations": observations(meta, fp, eps, secrets, dom, flags),
         }
         text_out = json.dumps(payload, indent=2)
     else:
@@ -306,6 +508,25 @@ def main():
                 L.append("    Confirm the version actually loaded at runtime before reporting;")
                 L.append("    bundles frequently ship a version string that a shim then replaces.")
 
+        if providers or flags or configs:
+            off = sorted(n for n, v in flags.items() if not v)
+            on = sorted(n for n, v in flags.items() if v)
+            L.append("")
+            L.append("FEATURE FLAGS AND CLIENT CONFIG")
+            if providers:
+                L.append("  provider: %s" % ", ".join(providers))
+            if configs:
+                L.append("  config object(s): %s" % ", ".join(configs))
+            if off:
+                L.append("  off in this build (%d) — the interesting half:" % len(off))
+                for name in off[:20]:
+                    L.append("    - %s" % name)
+                if len(off) > 20:
+                    L.append("    ... %d more" % (len(off) - 20))
+            if on:
+                L.append("  on (%d): %s%s" % (
+                    len(on), ", ".join(on[:12]), " ..." if len(on) > 12 else ""))
+
         endpoints = (eps or {}).get("endpoints", [])
         L.append("")
         L.append("ENDPOINTS (%d)" % len(endpoints))
@@ -319,7 +540,10 @@ def main():
                 L.append("  ... %d more" % (len(endpoints) - 30))
 
         sfind = (secrets or {}).get("findings", [])
-        real = [f for f in sfind if f["tier"] in ("confirmed", "probable")]
+        real = [f for f in sfind
+                if f["tier"] in ("confirmed", "probable") and not by_design_public(f)]
+        public = [f for f in sfind
+                  if f["tier"] in ("confirmed", "probable") and by_design_public(f)]
         info = [f for f in sfind if f["tier"] == "info"]
         L.append("")
         L.append("SECRETS AND DISCLOSURES (%d credential-shaped, %d informational)"
@@ -327,11 +551,33 @@ def main():
         for f in real[:15]:
             L.append("  %-10s %-26s %s  (line %s)" % (f["tier"], f["kind"][:26],
                                                       str(f["value"])[:34], f["line"]))
+            scope = KEY_SCOPE.get(f.get("format") or f["kind"])
+            if scope:
+                for i, chunk in enumerate(_wrap(scope[1], 68)):
+                    prefix = "             scope [%s]: " % scope[0] if i == 0 else "               "
+                    L.append(prefix + chunk)
         for f in info[:10]:
             extra = ""
             if f.get("jwt", {}).get("notes"):
                 extra = " — " + "; ".join(f["jwt"]["notes"][:2])
             L.append("  info       %-26s %s%s" % (f["kind"][:26], str(f["value"])[:34], extra))
+            scope = KEY_SCOPE.get(f.get("format") or f["kind"])
+            if scope:
+                for i, chunk in enumerate(_wrap(scope[1], 68)):
+                    prefix = "             scope [%s]: " % scope[0] if i == 0 else "               "
+                    L.append(prefix + chunk)
+        for f in public[:10]:
+            L.append("  public     %-26s %s  (line %s)" % (f["kind"][:26],
+                                                           str(f["value"])[:34], f["line"]))
+            scope = KEY_SCOPE.get(f.get("format") or f["kind"])
+            if scope:
+                for i, chunk in enumerate(_wrap(scope[1], 68)):
+                    prefix = "             scope [%s]: " % scope[0] if i == 0 else "               "
+                    L.append(prefix + chunk)
+        if public:
+            L.append("  The `public` rows are formats that belong in client code; they are")
+            L.append("  listed for completeness and excluded from the count above. Each is")
+            L.append("  only a finding if its restrictions are missing -- check, do not assume.")
         if not sfind:
             L.append("  None found." + (" [%s]" % s_err if s_err else ""))
 
@@ -345,7 +591,7 @@ def main():
         if not dfind:
             L.append("  None above low confidence." + (" [%s]" % d_err if d_err else ""))
 
-        obs = observations(meta, fp, eps, secrets, dom)
+        obs = observations(meta, fp, eps, secrets, dom, flags)
         if obs:
             L.append("")
             L.append("WHAT STANDS OUT")

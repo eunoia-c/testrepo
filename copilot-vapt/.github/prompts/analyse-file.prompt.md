@@ -17,8 +17,23 @@ python3 scripts/analyse_file.py <path-to-file>
 ```
 
 It prints the whole briefing: what the file is, library versions with advisory
-flags, endpoints, secrets, DOM XSS candidates, and cross-cutting observations.
-Use `--json` if the tester wants structured output instead.
+flags, feature flags and client config, endpoints, secrets annotated with the
+scope the key actually grants, DOM XSS candidates, and cross-cutting
+observations. Use `--json` if the tester wants structured output instead.
+
+Two parts of that output are easy to misread, so read them the way they are
+meant:
+
+- **Feature flags** are split into *off in this build* and *on*. The off half is
+  the interesting one — a false flag is a feature the UI will not show you, and
+  the route behind it is frequently still mounted server-side. Minified `!0`/`!1`
+  booleans are decoded for you. A flag that is off is a hint about where to look,
+  never evidence the route is live.
+- **Key scope** says whether a secret-shaped hit is actually a secret.
+  `pk_live_…`, `AIzaSy…`, `G-…` and `phc_…` belong in client code by design;
+  `sk_live_…` and `AKIA…` never do. A `depends` scope (Google API keys above all)
+  means the risk is entirely about referrer/IP restrictions, so the real test is
+  whether the restriction is set, not that the key exists.
 
 If `scripts/` is not present, fall back to reading the file yourself (or writing
 a script when it is minified) and cover the same ground in the same order — but
@@ -46,6 +61,27 @@ really the one running.
 **Note what the file implies about the rest of the application.** One bundle
 naming three API versions, or an admin route, or an auth interceptor, tells you
 something about the architecture — and about what else to go looking for.
+
+**Read the code the inventory points at.** This is the part that distinguishes a
+useful file review from a regex dump, and it is the only part a script cannot
+do. Open the file at the reported lines and answer:
+
+- *What actually gates this endpoint?* `auth: none` means no token was visible in
+  that call's own span. Read outward for a route guard, a login-gated module, or
+  a global interceptor — one global `axios` interceptor makes every per-call
+  verdict wrong in the same direction.
+- *What does this flag turn on?* Follow it to its consumers. A flag that swaps a
+  CSS class is noise; one that selects a different request path or mounts an
+  admin component is the find.
+- *What validation does this parameter get?* Client-side validation next to a
+  parameter is a hint the server trusts it. Note the constraint, then test
+  whether the server re-checks it.
+- *What is this key for?* Confirm the scope annotation against the call the key
+  is used in: which API, which host, which operation.
+
+Cite `file:line` from the briefing for each. "Reachable without the admin role
+because the only check is a client-side flag, at `app.js:1204`" is worth more
+than any count of endpoints found.
 
 ## Keep the framing
 
