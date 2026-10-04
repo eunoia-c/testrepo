@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hiding mechanisms test page</title>
+<style>
+  .d-none      { display: none; }
+  .vis-hidden  { visibility: hidden; }
+  .opacity-0   { opacity: 0; }
+  .cv-hidden   { content-visibility: hidden; }
+  .zero        { width: 0; height: 0; overflow: hidden; }
+  .maxh        { max-height: 0; overflow: hidden; }
+  .offscreen   { position: absolute; left: -9999px; }
+  .sr-only     { position: absolute; clip: rect(0 0 0 0); clip-path: inset(100%);
+                 width: 1px; height: 1px; overflow: hidden; }
+  .scale0      { transform: scale(0); }
+  .font0       { font-size: 0; }
+  .transparent { color: transparent; }
+  .indent      { text-indent: -9999px; }
+  .nopointer   { pointer-events: none; }
+  .under       { position: absolute; z-index: -1; }
+</style>
+</head>
+<body>
+<h1>Hiding mechanisms</h1>
+<p>Every control below carries a <code>name</code> of the form
+<code>m_&lt;mechanism&gt;</code>. A scan should find all of them. Only
+<code>m_visible</code> and the two submitted by the buttons should ever appear
+in the "sent" set, so everything else must land in <em>never sent</em>.</p>
+
+<form id="main" method="POST" action="/submit" enctype="application/x-www-form-urlencoded">
+  <input name="m_visible" value="visible">
+
+  <input type="hidden" name="m_type_hidden" value="1">
+  <input name="m_hidden_attr" hidden value="1">
+  <div inert><input name="m_inert" value="1"></div>
+  <input name="m_display_none" class="d-none" value="1">
+  <input name="m_visibility" class="vis-hidden" value="1">
+  <input name="m_opacity" class="opacity-0" value="1">
+  <div class="cv-hidden"><input name="m_content_visibility" value="1"></div>
+  <input name="m_zero_size" class="zero" value="1">
+  <div class="maxh"><input name="m_max_height" value="1"></div>
+  <input name="m_offscreen" class="offscreen" value="1">
+  <input name="m_sr_only" class="sr-only" value="1">
+  <input name="m_scale_zero" class="scale0" value="1">
+  <input name="m_font_zero" class="font0" value="1">
+  <input name="m_transparent" class="transparent" value="1">
+  <input name="m_text_indent" class="indent" value="1">
+  <input name="m_pointer_events" class="nopointer" value="1">
+  <input name="m_negative_z" class="under" value="1">
+  <input name="m_aria_hidden" aria-hidden="true" value="1">
+  <input name="m_tabindex" tabindex="-1" value="1">
+  <input name="m_disabled" disabled value="1">
+  <input name="m_readonly" readonly value="1">
+  <input name="m_pattern" pattern="[0-9]{4}" maxlength="4" required value="1234">
+
+  <details><summary>collapsed</summary>
+    <input name="m_details_closed" value="1">
+  </details>
+  <dialog><input name="m_dialog_closed" value="1"></dialog>
+
+  <select name="m_select">
+    <option value="user">user</option>
+    <option value="admin" hidden>admin</option>
+    <option value="root" disabled>root</option>
+  </select>
+
+  <button type="submit" name="m_submit" value="go">Submit form</button>
+  <button type="button" disabled name="m_disabled_button" value="1">Disabled action</button>
+</form>
+
+<!-- <input name="m_in_comment" value="debug"> -->
+<!-- legacy: <form action="/admin/override"><input name="m_override_approval"></form> -->
+
+<noscript><input name="m_in_noscript" value="1"></noscript>
+
+<template id="tpl">
+  <input name="m_in_template" value="1">
+  <button name="m_template_button">Hidden feature</button>
+</template>
+
+<open-host></open-host>
+<closed-host></closed-host>
+
+<p>
+  <button id="xhr">XHR with a param not in the DOM</button>
+  <button id="json">fetch JSON body</button>
+  <button id="beacon">sendBeacon</button>
+</p>
+
+<script>
+// Open shadow root: reachable by walking .shadowRoot.
+class OpenHost extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: "open" }).innerHTML =
+      '<input name="m_open_shadow" value="1">' +
+      '<input name="m_open_shadow_hidden" type="hidden" value="1">';
+  }
+}
+customElements.define("open-host", OpenHost);
+
+// Closed shadow root: only findable by having hooked attachShadow before this
+// ran, which is why the extension's MAIN-world script is document_start.
+class ClosedHost extends HTMLElement {
+  connectedCallback() {
+    const r = this.attachShadow({ mode: "closed" });
+    r.innerHTML = '<input name="m_closed_shadow" value="1">' +
+                  '<button name="m_closed_shadow_button">Internal</button>';
+  }
+}
+customElements.define("closed-host", ClosedHost);
+
+// Added after load: a scan must see it, so the walk cannot be a one-shot at
+// document_start.
+setTimeout(() => {
+  const late = document.createElement("input");
+  late.name = "m_added_later";
+  late.className = "d-none";
+  document.getElementById("main").appendChild(late);
+}, 800);
+
+// Parameters that only ever exist at request time. These should show up under
+// "sent but not in the DOM" -- reading the HTML would never find them.
+document.getElementById("xhr").onclick = () => {
+  const x = new XMLHttpRequest();
+  x.open("POST", "/api/track?s_from_url=1");
+  x.send("s_xhr_body=1&s_csrf=abc");
+};
+document.getElementById("json").onclick = () => {
+  fetch("/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ s_json_top: 1, nested: { s_json_nested: 2 } }),
+  }).catch(() => {});
+};
+document.getElementById("beacon").onclick = () => {
+  navigator.sendBeacon("/api/beacon?s_beacon=1");
+};
+</script>
+</body>
+</html>

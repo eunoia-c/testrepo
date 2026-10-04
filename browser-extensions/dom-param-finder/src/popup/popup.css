@@ -1,0 +1,49 @@
+:root {
+  --bg: #fff; --fg: #1a1a1a; --muted: #6b6b6b; --line: #e2e2e2;
+  --accent: #b3261e; --chip: #f3f3f3; --card: #fafafa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1d1f21; --fg: #e8e8e8; --muted: #9aa0a6; --line: #34373a;
+    --accent: #ff7b72; --chip: #2a2d30; --card: #23262a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  width: 520px; max-height: 600px; margin: 0; padding: 10px;
+  background: var(--bg); color: var(--fg); overflow-y: auto;
+  font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.muted { color: var(--muted); font-size: 11px; word-break: break-all; }
+.hidden { display: none !important; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+button {
+  font: inherit; padding: 4px 9px; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--chip); color: var(--fg); cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--accent); }
+.chk { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); }
+input[type="search"] {
+  flex: 1; min-width: 100px; font: inherit; padding: 3px 6px;
+  border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg); color: var(--fg);
+}
+.row {
+  border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+  padding: 6px 8px; margin-bottom: 6px;
+}
+.row.never-sent { border-left: 3px solid var(--accent); }
+.row h4 { margin: 0 0 2px; font-size: 12px; font-family: ui-monospace, monospace; }
+.row h4 .tag { color: var(--muted); font-weight: normal; }
+.row .why { color: var(--muted); font-size: 11px; margin: 2px 0; }
+.row .acts { display: flex; gap: 4px; margin-top: 4px; }
+.row .acts button { padding: 2px 7px; font-size: 11px; }
+.badge {
+  display: inline-block; padding: 0 5px; border-radius: 8px;
+  background: var(--chip); color: var(--muted); font-size: 10px; margin-left: 4px;
+}
+.badge.hot { background: var(--accent); color: #fff; }
+footer { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; }

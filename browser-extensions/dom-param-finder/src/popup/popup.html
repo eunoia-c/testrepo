@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DOM Param Finder</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <strong>DOM Param Finder</strong>
+    <span id="origin" class="muted"></span>
+  </header>
+
+  <div id="scope-bar" class="bar hidden">
+    <span>This origin is not in scope.</span>
+    <button id="add-scope" class="primary">Add &amp; instrument</button>
+  </div>
+
+  <div id="controls" class="bar hidden">
+    <button id="scan">Scan DOM</button>
+    <button id="reveal-all">Reveal all</button>
+    <button id="enable-all">Enable all</button>
+    <button id="unreveal">Revert</button>
+    <label class="chk"><input type="checkbox" id="watch"> keep revealed</label>
+  </div>
+
+  <div id="filters" class="bar hidden">
+    <label class="chk"><input type="radio" name="f" value="never-sent" checked> never sent</label>
+    <label class="chk"><input type="radio" name="f" value="hidden"> hidden</label>
+    <label class="chk"><input type="radio" name="f" value="all"> all</label>
+    <input type="search" id="q" placeholder="filter by name">
+  </div>
+
+  <p id="status" class="muted"></p>
+  <div id="list"></div>
+
+  <footer class="hidden" id="foot">
+    <button id="export">Export JSON</button>
+    <button id="wordlist">Copy names</button>
+    <button id="clear-sent" title="Forget the parameters observed so far">Reset traffic</button>
+    <button id="remove-scope" class="danger">Remove scope</button>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

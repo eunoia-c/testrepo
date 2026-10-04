@@ -5,3 +5,7 @@ __pycache__/
 # Scanner output directories (apex_scan.py --out, snowpick --output)
 results/
 *.results.json
+
+# Node modules from the browser-extension test run
+node_modules/
+package-lock.json

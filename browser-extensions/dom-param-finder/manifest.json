@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "DOM Param Finder",
+  "version": "0.1.0",
+  "description": "Inventories parameters, buttons and insertion points in the live DOM, and shows which of them the page never actually sends.",
+  "minimum_chrome_version": "116",
+
+  "permissions": ["scripting", "storage", "activeTab", "clipboardWrite"],
+
+  "optional_host_permissions": ["*://*/*"],
+
+  "background": { "service_worker": "src/background.js", "type": "module" },
+
+  "action": {
+    "default_title": "DOM Param Finder",
+    "default_popup": "src/popup/popup.html"
+  },
+
+  "devtools_page": "src/devtools/devtools.html",
+
+  "web_accessible_resources": []
+}
