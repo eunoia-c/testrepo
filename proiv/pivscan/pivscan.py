@@ -1145,6 +1145,101 @@ RULES = [
         "refs": ["CWE-602", "OWASP ASVS V1.4.1", "OWASP Top 10 A01"],
     },
     {
+        "id": "PIV-NET-017",
+        "recommendation": (
+            "Enable transport encryption between the client and the PROIV service, and "
+            "enforce it server-side so a client that omits it is refused. On the Windows "
+            "thick client this is the 'Use Secure Socket:SSL' check box in Connection "
+            "Settings together with the SSL port; on Open Client / client services it is "
+            "Connection Protocol = Https (default port 8804), over either the WebSocket "
+            "or HTTP transport; and PROIV Service Settings has a separate Service "
+            "Encryption option. Where the session reaches the server through an SSH "
+            "local port forward, TLS still terminates at the real server rather than at "
+            "the forwarder, so enabling it is what makes the loopback leg unreadable."
+        ),
+        "cvss_hint": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+        "internal_adjust": 0,
+        "context_note": (
+            "Do not downgrade this by assuming an SSH tunnel covers it. A tunnel "
+            "protects the hop between hosts; the client-to-forwarder hop on the "
+            "workstation stays in whatever the application speaks, so on a multi-user "
+            "host (Citrix, RDS) the plaintext is exposed to every other session's "
+            "administrator and to anything running locally. On a single-user "
+            "workstation capturing your own loopback is close to informational -- the "
+            "severity here is set by how many identities share the host."
+        ),
+        "title": "Transport encryption not enabled on the client connection",
+        "severity": "HIGH",
+        "pattern": r"\b(usesecuresocket|use[_ ]?secure[_ ]?socket|securesocket|ssl|tls|https?|websocket|transport|connectionprotocol|connection[_ ]?protocol)\b",
+        "impact": (
+            "PROIV offers transport encryption for the client connection in several "
+            "places -- 'Use Secure Socket:SSL' on the thick client, Https as the Open "
+            "Client connection protocol, and a Service Encryption option whose state "
+            "the PIV service/version value reflects (501 encrypted, 500 unencrypted). "
+            "With none of them on, the PROIV protocol is cleartext TCP, including the "
+            "application login that follows connection setup. An SSH tunnel does not "
+            "substitute: it encrypts one hop, and the client-to-forwarder hop on the "
+            "workstation remains readable to anything on that host."
+        ),
+        "verify": (
+            "Read the decoded PIV (pivscan plaintext) for the service/version value and "
+            "any secure-socket or protocol field, then confirm on the wire. Where a "
+            "local SSH forward is in play, capture the loopback hop and the external "
+            "hop separately -- they can differ. Then test whether the SERVER refuses an "
+            "unencrypted client, which is the question that decides whether this is "
+            "configuration or enforcement."
+        ),
+        "refs": ["CWE-319", "OWASP ASVS V9.1", "MITRE ATT&CK T1040"],
+    },
+    {
+        "id": "PIV-CRED-018",
+        "recommendation": (
+            "Do not ship SSH credentials in the session file. Use key authentication "
+            "with a passphrase, store the private key in a per-user location the user "
+            "cannot copy wholesale, and keep the passphrase out of the PIV. Restrict "
+            "the server-side account to exactly what the session needs: a forced "
+            "command or no-shell account, AllowTcpForwarding limited and permitopen "
+            "scoped to the application port, so a recovered credential cannot become a "
+            "shell or a pivot. Keep strict host key checking on."
+        ),
+        "cvss_hint": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "internal_adjust": 0,
+        "context_note": (
+            "This is usually MORE severe than an application password, not less, and "
+            "the application login that appears after the tunnel comes up is not a "
+            "mitigation for it -- the two authenticate to different things. SSH "
+            "credentials are operating-system access to the application server plus, "
+            "unless forwarding is restricted, a route to anything that host can reach. "
+            "The deciding factor is what the account is permitted to do, not where the "
+            "tester is standing."
+        ),
+        "title": "SSH credentials in session file (OS access, not just application access)",
+        "severity": "CRITICAL",
+        "pattern": r"\b(ssh|sshlink|privatekey|private[_ ]?key|keyfile|key[_ ]?file|passphrase|identityfile|knownhosts|known[_ ]?hosts|stricthostkey|strict[_ ]?host[_ ]?key|port[_ ]?forward|localforward|tunnel)\b",
+        "impact": (
+            "Where the client reaches the server by establishing an SSH session and "
+            "forwarding a local port, the credentials in the PIV are SSH credentials. "
+            "Recovering them yields access to the host operating system, not to the "
+            "application -- and the application login presented after the tunnel is "
+            "established authenticates a different thing entirely, so it does not "
+            "contain this. Unless the account is restricted to a forced command with "
+            "forwarding scoped, the same credential grants a shell and the ability to "
+            "forward arbitrary ports to anything the server can reach, which turns a "
+            "session file into an internal-network pivot."
+        ),
+        "verify": (
+            "With the recovered credential, establish an SSH session yourself and "
+            "answer three questions: does it yield an interactive shell; can you "
+            "forward a port to a host other than the application server (ssh -L to "
+            "something unrelated); and is the account shared across users rather than "
+            "per person. A restricted no-shell account with permitopen scoped to the "
+            "application port is a far smaller finding than a general-purpose login, "
+            "and the difference is worth establishing before scoring it."
+        ),
+        "refs": ["CWE-522", "CWE-798", "CWE-306", "MITRE ATT&CK T1021.004",
+                 "MITRE ATT&CK T1572"],
+    },
+    {
         "id": "PIV-MISC-016",
         "recommendation": (
             "Treat the proxy/connector account as a privileged service identity: unique "

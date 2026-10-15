@@ -169,6 +169,99 @@ then `AAAAAAAB`, and read the diff:
 **3. `carve`** — extract PEM blocks, archives and high-entropy regions for
 separate review. Use this on binary PIVs where the string scan comes up empty.
 
+## The SSH-tunnel deployment
+
+A common architecture: a helper executable establishes an SSH session to the
+application server and sets up a **local port forward**, after which the client
+speaks the PROIV protocol to `127.0.0.1:<port>` and the application login
+appears. Two things follow, and both are easy to score wrongly.
+
+### The credentials in the PIV are SSH credentials, which is worse
+
+The instinct is that this is *less* of a problem than an application password,
+because an application login still appears once the tunnel is up. That reads
+the trust boundary backwards. The application login and the SSH login
+authenticate to **different things**: one to the application, one to the host
+operating system. Recovering SSH credentials from a PIV gives a shell on the
+application server and — unless forwarding is restricted — the ability to
+forward arbitrary ports to anything that server can reach. The application
+login does not contain any of that, so it is not a mitigation.
+
+Three questions set the severity, and they are worth answering before scoring
+it (`PIV-CRED-018` prints them):
+
+1. Does the credential yield an **interactive shell**?
+2. Can you `ssh -L` to a host **other** than the application server — i.e. is
+   it a network pivot?
+3. Is the account **shared** across users, or per person?
+
+A `nologin` account with a forced command and `permitopen` scoped to the
+application port is a far smaller finding than a general-purpose login. A
+shared service account with a shell is about as large as findings get.
+
+Also check whether the private key path *and* its passphrase are both in the
+PIV — a passphrase-protected key stops being passphrase-protected when the
+passphrase ships beside it.
+
+### Cleartext on the loopback hop: yes, PROIV can encrypt it
+
+The tunnel protects the hop between hosts. The hop from the client to the local
+forwarder is whatever the application speaks, so a loopback capture shows the
+PROIV protocol in the clear — including the application login that follows.
+
+**PROIV does support encrypting it**, in up to three separate places depending
+on client and version:
+
+| Where | Setting |
+| --- | --- |
+| Windows thick client | **Use Secure Socket:SSL** check box in Connection Settings, with the SSL port — note an SSL connection may use a different port than the standard Telnet port ([Connection Settings](https://support.proiv.com/V8_Help/openclientadmin/proiv_client_and_open_client_-_connection_settings.htm)) |
+| Open Client / client services | **Connection Protocol = Https**, described as HTTP "where the data is encrypted using the Secure Socket Layer (SSL)", default port 8804 ([Open Client Service Settings](https://support.proiv.com/V8_Help/openclientadmin/open_client_service_settings.htm)) |
+| Service definition | **Service Encryption**, "whether the service will be encrypted (PIV version 501) or unencrypted (PIV version 500)" ([PROIV Service Settings](https://support.proiv.com/V8_Help/clientadministration/proiv_service_settings.htm)) |
+
+The transport underneath is separately selectable — WebSocket (the default in
+current versions) or HTTP, for both Lite Client and Open Client
+([Open Client Transport Protocol](https://support.proiv.com/V14_Help/desktop/openclientadmin/open_client_transport_protocol.htm)).
+
+The part that makes this work through a tunnel: **TLS terminates at the real
+server, not at the forwarder.** SSH local forwarding is transparent TCP, so an
+encrypted PROIV session stays encrypted across the loopback hop as well —
+enabling it is exactly what makes the capture useless, with no change to the
+tunnel.
+
+So the finding is not "the protocol has no encryption available". It is "the
+available encryption is switched off", which is a much stronger sentence in a
+report because the remediation is a check box. `PIV-NET-017` flags the relevant
+fields; read the decoded PIV for the service/version value and any
+secure-socket field with `pivscan plaintext`.
+
+Severity depends almost entirely on **how many identities share the
+workstation**. On a single-user machine, capturing your own loopback needs
+local administrator rights and a loopback-capable capture driver, so on its own
+it sits near informational. On a multi-user host — Citrix or RDS, which is
+where thick clients like this usually live — the plaintext is exposed to every
+other session's administrator and to anything running locally, and the
+credentials of every user on that host cross it.
+
+### The stronger finding on that host
+
+While looking at the loopback hop, check what the forwarder's listening socket
+actually permits. A local forward is **an unauthenticated entrance to the
+tunnel**: any process that can connect to it reaches the application server
+without presenting an SSH credential at all. So:
+
+```
+netstat -ano | findstr LISTENING
+```
+
+- Bound to `127.0.0.1:<port>` — reachable by every process and every user on
+  that host. On a shared host that is a cross-user path into the backend.
+- Bound to `0.0.0.0:<port>` — reachable from the **network**. Anyone who can
+  route to the workstation gets a tunnel into the application server, and that
+  is a far more serious finding than the capture.
+
+That question is usually worth more than the packet capture, and it is answered
+by one command.
+
 ## Can the vendor fix this? Not by encrypting the file
 
 Worth settling before you write the recommendation, because the obvious advice
@@ -264,7 +357,7 @@ testing before quoting any of it to a client.
 
 ## Rules
 
-16 rules, keyword- and structure-driven rather than offset-driven so they work
+18 rules, keyword- and structure-driven rather than offset-driven so they work
 on both the INI-ish text variants and the binary ones.
 
 | ID | Finding | Base severity |
@@ -284,6 +377,8 @@ on both the INI-ish text variants and the binary ones.
 | `PIV-DEBUG-013` | Debug, trace or diagnostic setting enabled | MEDIUM |
 | `PIV-DB-014` | Database connection detail exposed to the client | CRITICAL |
 | `PIV-UI-015` | Client-side-only restriction flag | MEDIUM |
+| `PIV-NET-017` | Transport encryption not enabled on the client connection | HIGH |
+| `PIV-CRED-018` | SSH credentials in session file (OS access, not application access) | CRITICAL |
 | `PIV-MISC-016` | Proxy / connector service credentials | HIGH |
 
 Every finding prints why it matters, how to verify it yourself, a
@@ -313,6 +408,10 @@ Rules marked `internal_adjust: 0` deliberately do **not** downgrade:
   compromised regardless of network position.
 - **`PIV-TAMPER-007`** — phishing a `.piv` works the same internally, and
   internal users are *more* likely to open one that looks legitimate.
+- **`PIV-CRED-018`** — SSH credentials are host access; the application login
+  that follows the tunnel authenticates something else and does not contain it.
+- **`PIV-NET-017`** — an SSH tunnel protects one hop, not the client-to-
+  forwarder hop on the workstation.
 
 Use `--context raw` when you want the uncalibrated base severities.
 
@@ -375,7 +474,7 @@ across releases. Confirm against the client you are actually testing.
 ## Tests
 
 ```bash
-python3 -m unittest test_pivscan        # 108 tests
+python3 -m unittest test_pivscan        # 116 tests
 ```
 
 Fixtures are generated at run time by `tests/make_fixtures.py` — nothing
@@ -385,7 +484,9 @@ session with UTF-16LE strings and a single-byte-XOR password, a before/after
 pair differing by one known character, and an opaque PIV with nothing in it
 (to prove the tool reports "none matched" rather than inventing findings).
 
-Fixtures also include an obfuscated PIV (`PRO4VS` magic + XOR `0x3b` over
+Fixtures also include an SSH-tunnel session (SSH credentials, a private key
+path with its passphrase beside it, strict host key checking off, no transport
+encryption) and an obfuscated PIV (`PRO4VS` magic + XOR `0x3b` over
 UTF-16LE) and one under a repeating two-byte key, which is the case single-byte
 recovery alone cannot solve.
 

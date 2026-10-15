@@ -123,6 +123,28 @@ def obfuscated_piv(key=0x3B, magic=b"PRO4VS"):
     return magic + bytes(b ^ key for b in body)
 
 
+def ssh_tunnel_piv():
+    """A session that reaches the server over SSH with a local port forward --
+    the architecture where the PIV holds SSH credentials and the application
+    protocol then runs over loopback into the forwarder."""
+    return (
+        "[PROIV Session]\r\n"
+        "Version=500\r\n"
+        "ConnectionProtocol=Http\r\n"
+        "UseSecureSocket=0\r\n"
+        "Transport=WebSocket\r\n"
+        "SshHost=proiv-app04.corp.internal\r\n"
+        "SshPort=22\r\n"
+        "SshUserName=svc_proiv\r\n"
+        "SshPassword=" + PLAIN_PW + "\r\n"
+        "PrivateKeyFile=C:\\PROIV\\keys\\id_rsa\r\n"
+        "Passphrase=" + PLAIN_PW + "\r\n"
+        "StrictHostKeyChecking=0\r\n"
+        "LocalForward=127.0.0.1:12023\r\n"
+        "Port=12023\r\n"
+    ).encode("ascii")
+
+
 def write(outdir):
     os.makedirs(outdir, exist_ok=True)
     made = {}
@@ -143,6 +165,7 @@ def write(outdir):
 
     # The field case: obfuscated, and a second one under a repeating 2-byte key
     # to prove column-wise recovery is not limited to single-byte keys.
+    made["ssh_tunnel.piv"] = ssh_tunnel_piv()
     made["obfuscated.piv"] = obfuscated_piv()
     made["obfuscated_multibyte.piv"] = (
         b"PRO4VS" + bytes(

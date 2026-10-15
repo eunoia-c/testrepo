@@ -158,6 +158,57 @@ class TestRules(FixtureCase):
             self.assertIn(r["severity"], pivscan.SEV_ORDER)
 
 
+class TestTunnelArchitecture(FixtureCase):
+    """The SSH-local-forward deployment: the PIV carries SSH credentials and the
+    application protocol then runs over loopback into the forwarder."""
+
+    def setUp(self):
+        self.rep = pivscan.scan(self.fx("ssh_tunnel.piv"))
+        self.ids = {f["id"] for f in self.rep["findings"]}
+
+    def test_ssh_credentials_detected(self):
+        self.assertIn("PIV-CRED-018", self.ids)
+
+    def test_missing_transport_encryption_detected(self):
+        self.assertIn("PIV-NET-017", self.ids)
+
+    def test_ssh_credentials_outrank_an_application_password(self):
+        # SSH credentials are OS access, so the rule must not be scored below
+        # the application-credential rule -- and the login page that appears
+        # after the tunnel comes up is not a mitigation for it.
+        ssh = next(f for f in self.rep["findings"] if f["id"] == "PIV-CRED-018")
+        self.assertEqual(ssh["base_severity"], "CRITICAL")
+        self.assertFalse(ssh["adjusted"], "SSH credentials must not be downgraded "
+                                          "for internal context")
+
+    def test_transport_encryption_is_not_downgraded_by_the_tunnel(self):
+        net = next(f for f in self.rep["findings"] if f["id"] == "PIV-NET-017")
+        self.assertFalse(net["adjusted"])
+        self.assertIn("tunnel", net["impact"].lower())
+
+    def test_verification_asks_the_question_that_sets_severity(self):
+        ssh = next(f for f in self.rep["findings"] if f["id"] == "PIV-CRED-018")
+        for probe in ("shell", "forward", "shared"):
+            self.assertIn(probe, ssh["verify"].lower())
+
+    def test_passphrase_and_key_path_both_surface(self):
+        plain = pivscan.render_plaintext(self.fx("ssh_tunnel.piv"))
+        self.assertIn("PrivateKeyFile=", plain)
+        self.assertIn("Passphrase=", plain)
+
+    def test_strict_host_key_checking_off_is_visible(self):
+        self.assertIn("StrictHostKeyChecking=0",
+                      pivscan.render_plaintext(self.fx("ssh_tunnel.piv")))
+
+    def test_recommendation_names_the_real_controls(self):
+        net = next(f for f in self.rep["findings"] if f["id"] == "PIV-NET-017")
+        low = net["recommendation"].lower()
+        self.assertIn("secure socket", low)
+        self.assertIn("https", low)
+        ssh = next(f for f in self.rep["findings"] if f["id"] == "PIV-CRED-018")
+        self.assertIn("permitopen", ssh["recommendation"].lower())
+
+
 class TestSeverityContext(FixtureCase):
     def test_internal_downgrades_marked_rules(self):
         rep = pivscan.scan(self.fx("text.piv"), context="internal")
