@@ -230,11 +230,25 @@ class TestReversals(unittest.TestCase):
     def test_hex_recovered(self):
         self.assertEqual(pivscan.try_hex("70617373776f7264"), "password")
 
+    def test_single_byte_xor_surfaces_a_high_key(self):
+        # Regression: these used to return the first five printable results in
+        # key order, so a high key lost to low-numbered garbage and never
+        # appeared. Candidates are ranked by plaintext likeness before capping.
+        secret = "Winter2024"
+        blob = bytes(ord(c) ^ 0x5A for c in secret)
+        hits = pivscan.try_single_byte_xor(blob)
+        self.assertEqual(hits[0][1], secret, "correct key should rank first")
+        self.assertEqual(hits[0][0], 0x5A)
+
     def test_single_byte_xor_recovers_a_low_key(self):
         secret = "Operator"
         blob = bytes(ord(c) ^ 0x01 for c in secret)
         hits = pivscan.try_single_byte_xor(blob)
         self.assertIn(secret, [plain for _, plain in hits])
+
+    def test_bigram_scoring_separates_words_from_noise(self):
+        self.assertGreater(pivscan.plaintext_likeness(b"Winter2024"),
+                           pivscan.plaintext_likeness(b"Uklvgp0206"))
 
     def test_additive_shift_recovers_plaintext(self):
         secret = "Operator"
@@ -267,23 +281,6 @@ class TestKnownGaps(FixtureCase):
             "if this now finds the XOR'd secret, the gap is fixed -- "
             "delete this test and update the README's Limits section")
 
-    def test_known_gap_xor_cap_can_hide_the_right_key(self):
-        # try_single_byte_xor walks keys 1..255 in order and returns hits[:5].
-        # Any key that is printable-looking produces a "hit", so for a high
-        # key the five lowest keys fill the list and the correct plaintext is
-        # never shown. The key IS found by the search -- it is the cap, applied
-        # before ranking, that discards it.
-        secret = "Winter2024"
-        blob = bytes(ord(c) ^ 0x5A for c in secret)
-        shown = [plain for _, plain in pivscan.try_single_byte_xor(blob)]
-        self.assertNotIn(secret, shown,
-                         "if the right key now surfaces, the cap was fixed -- "
-                         "delete this test and update the README's Limits section")
-
-        # Proof that the search itself works: unbounded, 0x5A is in there.
-        every = [(k, bytes(c ^ k for c in blob)) for k in range(1, 256)]
-        self.assertIn(secret, [v.decode("latin-1") for _, v in every])
-
     def test_rule_keywords_still_fire_on_the_binary(self):
         # The gap is in value analysis, not rule matching: the settings are
         # still reported, so the file does not read as clean.
@@ -291,6 +288,232 @@ class TestKnownGaps(FixtureCase):
         ids = {f["id"] for f in rep["findings"]}
         self.assertIn("PIV-CRED-001", ids)
         self.assertIn("PIV-AUTH-004", ids)
+
+
+class TestDeobfuscation(FixtureCase):
+    """The case that made the scanner report a clean file: UTF-16LE property
+    text XOR'd with one byte, behind a plaintext magic."""
+
+    def test_header_skip_finds_the_magic_only(self):
+        raw = pivscan.read_file(self.fx("obfuscated.piv"))
+        self.assertEqual(raw[:pivscan.header_skip(raw)], b"PRO4VS")
+
+    def test_header_skip_does_not_run_into_the_body(self):
+        # XOR'd UTF-16LE is printable too, so "advance while printable" walks
+        # past the magic and poisons key recovery.
+        raw = pivscan.read_file(self.fx("obfuscated.piv"))
+        self.assertLess(pivscan.header_skip(raw), 10)
+
+    def test_header_skip_zero_on_a_text_piv(self):
+        raw = pivscan.read_file(self.fx("text.piv"))
+        self.assertEqual(pivscan.header_skip(raw), 0)
+
+    def test_single_byte_key_recovered(self):
+        raw = pivscan.read_file(self.fx("obfuscated.piv"))
+        body = raw[pivscan.header_skip(raw):]
+        self.assertEqual(pivscan.recover_xor_key_modal(body, 1), b"\x3b")
+        self.assertEqual(pivscan.recover_xor_key_columns(body, 1), b"\x3b")
+
+    def test_multibyte_key_recovered(self):
+        # The modal trick alone cannot do this: with an even key length every
+        # UTF-16 null lands in one column and the others hold no nulls at all.
+        raw = pivscan.read_file(self.fx("obfuscated_multibyte.piv"))
+        body = raw[pivscan.header_skip(raw):]
+        best = pivscan.deobfuscate_candidates(raw, skip=pivscan.header_skip(raw))[0]
+        self.assertEqual(best["transform"], "xor:3b2f")
+
+    def test_best_candidate_is_the_right_transform(self):
+        raw = pivscan.read_file(self.fx("obfuscated.piv"))
+        cands = pivscan.deobfuscate_candidates(raw, skip=pivscan.header_skip(raw))
+        self.assertEqual(cands[0]["transform"], "xor:3b")
+        self.assertGreaterEqual(len(cands[0]["keyword_hits"]), 10)
+
+    def test_repeated_keys_are_collapsed(self):
+        self.assertEqual(pivscan.smallest_period(b"\x3b\x3b\x3b"), b"\x3b")
+        self.assertEqual(pivscan.smallest_period(b"\x3b\x2f\x3b\x2f"), b"\x3b\x2f")
+        self.assertEqual(pivscan.smallest_period(b"\x01\x02\x03"), b"\x01\x02\x03")
+
+    def test_scan_auto_decodes_and_says_so(self):
+        rep = pivscan.scan(self.fx("obfuscated.piv"))
+        self.assertTrue(rep["obfuscation"]["detected"])
+        self.assertEqual(rep["obfuscation"]["transform"], "xor:3b")
+        self.assertEqual(rep["obfuscation"]["source"], "auto-detected")
+        self.assertIn("DEFEATED", pivscan.render(rep))
+
+    def test_rules_fire_after_decoding(self):
+        # Before this, the same file produced zero findings.
+        ids = {f["id"] for f in pivscan.scan(self.fx("obfuscated.piv"))["findings"]}
+        for expected in ("PIV-CRED-001", "PIV-CRED-002", "PIV-AUTH-004",
+                         "PIV-NET-005", "PIV-PATH-008", "PIV-DEBUG-013"):
+            self.assertIn(expected, ids)
+
+    def test_credential_recovered_from_the_obfuscated_file(self):
+        rep = pivscan.scan(self.fx("obfuscated.piv"))
+        keys = {c["key"] for c in rep["credential_candidates"]}
+        self.assertIn("ProivPassword", keys)
+        cred = next(c for c in rep["credential_candidates"]
+                    if c["key"] == "ProivPassword")
+        self.assertTrue(cred["assessment"].startswith("STORED IN PLAINTEXT"))
+
+    def test_offsets_still_address_the_original_file(self):
+        # A byte-wise transform preserves length, so a reported offset must
+        # point at the right place in the file on disk -- that is what makes
+        # the output usable in a hex editor.
+        rep = pivscan.scan(self.fx("obfuscated.piv"))
+        raw = pivscan.read_file(self.fx("obfuscated.piv"))
+        cred = next(c for c in rep["credential_candidates"]
+                    if c["key"] == "ProivPassword")
+        decoded = raw[:6] + pivscan.xor_bytes(raw[6:], b"\x3b")
+        at_offset = decoded[cred["offset"]:cred["offset"] + 40]
+        # The decoded field is UTF-16LE, so the ASCII name is interleaved with
+        # nulls -- decode before comparing.
+        self.assertTrue(at_offset.decode("utf-16-le", "replace")
+                        .startswith("ProivPassword="))
+
+    def test_size_and_entropy_describe_the_file_on_disk(self):
+        rep = pivscan.scan(self.fx("obfuscated.piv"))
+        self.assertEqual(rep["size"], len(pivscan.read_file(self.fx("obfuscated.piv"))))
+
+    def test_no_false_decode_on_a_plaintext_piv(self):
+        # The expensive failure mode: "decoding" a file that was never encoded.
+        for name in ("text.piv", "binary.piv", "empty.piv"):
+            rep = pivscan.scan(self.fx(name))
+            self.assertFalse(rep["obfuscation"]["detected"],
+                             "%s was wrongly decoded" % name)
+
+    def test_auto_decode_can_be_turned_off(self):
+        rep = pivscan.scan(self.fx("obfuscated.piv"), auto_decode=False)
+        self.assertFalse(rep["obfuscation"]["detected"])
+        self.assertEqual(rep["findings"], [])     # back to the silent-pass behaviour
+
+    def test_explicit_spec_is_applied(self):
+        rep = pivscan.scan(self.fx("obfuscated.piv"), spec="xor:3b")
+        self.assertEqual(rep["obfuscation"]["source"], "user-specified")
+        self.assertIn("PIV-CRED-001", {f["id"] for f in rep["findings"]})
+
+    def test_spec_parsing(self):
+        self.assertEqual(pivscan.parse_spec("xor:3b"), ("xor", b"\x3b"))
+        self.assertEqual(pivscan.parse_spec("xor:3b2f"), ("xor", b"\x3b\x2f"))
+        self.assertEqual(pivscan.parse_spec("add:05"), ("add", b"\x05"))
+        self.assertEqual(pivscan.parse_spec("none"), ("none", b""))
+        with self.assertRaises(ValueError):
+            pivscan.parse_spec("rot13:5")
+
+    def test_add_transform_round_trips(self):
+        plain = b"HostName=server01"
+        cipher = pivscan.add_bytes(plain, 0x05)
+        self.assertEqual(pivscan.apply_transform(cipher, "add", b"\x05"), plain)
+
+    def test_xor_transform_round_trips(self):
+        plain = b"HostName=server01"
+        cipher = pivscan.xor_bytes(plain, b"\x3b\x2f")
+        self.assertEqual(pivscan.apply_transform(cipher, "xor", b"\x3b\x2f"), plain)
+
+    def test_decode_report_lists_candidates(self):
+        out = pivscan.decode_report(self.fx("obfuscated.piv"))
+        self.assertIn("xor:3b", out)
+        self.assertIn("hostname", out)
+
+    def test_decode_report_writes_the_decoded_file(self):
+        out_path = os.path.join(self.dir, "decoded.bin")
+        pivscan.decode_report(self.fx("obfuscated.piv"), out=out_path)
+        self.assertTrue(os.path.exists(out_path))
+        data = pivscan.read_file(out_path)
+        self.assertTrue(data.startswith(b"PRO4VS"))
+        self.assertIn(b"H\x00o\x00s\x00t\x00N\x00a\x00m\x00e\x00", data)
+
+    def test_decode_report_admits_defeat_on_an_opaque_file(self):
+        out = pivscan.decode_report(self.fx("empty.piv"))
+        self.assertIn("No candidate recovered", out)
+
+    def test_nothing_matched_output_points_at_decode(self):
+        out = pivscan.render(pivscan.scan(self.fx("empty.piv")))
+        self.assertIn("pivscan decode", out)
+
+    def _big_obfuscated(self, key, repeats=30):
+        """~100 KB of UTF-16LE properties under `key`. Size matters here: the
+        scoring bugs this guards against only appear at scale."""
+        props = [
+            "HostName=proiv-app01.corp.internal", "ProivUserName=operator",
+            "ProivPassword=" + make_fixtures.PLAIN_PW, "SessionType=Telnet",
+            "RememberUsernameAndPassword=1", "PromptForSecurity=0",
+            "ActivateUserRuntimeInterface=1", "DebugTrace=1",
+            "ApplicationDefinitions=\\\\fs01\\proiv$\\appdef.ini",
+            "XferIn=MENU=ADMIN", "UploadMax=1048576", "CustomToolBar=1",
+        ]
+        body = b""
+        for _ in range(repeats):
+            for f in props:
+                body += f.encode("utf-16-le") + b"\x01\x00"
+        path = os.path.join(self.dir, "big_%s.piv" % key.hex())
+        with open(path, "wb") as fh:
+            fh.write(b"PRO4VS" + pivscan.xor_bytes(body, key))
+        return path
+
+    def test_score_prefers_correct_utf16_over_printable_garbage(self):
+        # The regression that mattered most. A UTF-16 character is two bytes
+        # but one extracted character, so counting characters scored printable
+        # garbage at ~2x a correct decode: on a 100 KB file the right key
+        # scored 51,930 and a wrong one 101,789. Coverage is counted in bytes.
+        path = self._big_obfuscated(b"\x3b")
+        raw = pivscan.read_file(path)
+        body = raw[pivscan.header_skip(raw):]
+        right = pivscan.text_score(pivscan.xor_bytes(body, b"\x3b"))
+        wrong = pivscan.text_score(pivscan.xor_bytes(body, b"\x32"))
+        self.assertGreater(len(right["keyword_hits"]), 5)
+        self.assertEqual(wrong["keyword_hits"], [])
+        self.assertGreater(right["score"], wrong["score"])
+
+    def test_coverage_counts_utf16_as_two_bytes(self):
+        utf16 = pivscan.text_score("HostName=server01".encode("utf-16-le"))
+        ascii_ = pivscan.text_score(b"HostName=server01")
+        # Both account for essentially the whole input.
+        self.assertGreater(utf16["coverage"], 0.8)
+        self.assertGreater(ascii_["coverage"], 0.8)
+
+    def test_detection_works_at_scale(self):
+        for key in (b"\x3b", b"\x3b\x2f"):
+            rep = pivscan.scan(self._big_obfuscated(key))
+            self.assertTrue(rep["obfuscation"]["detected"],
+                            "100 KB file with key %s not detected" % key.hex())
+            self.assertEqual(rep["obfuscation"]["transform"],
+                             "xor:" + key.hex())
+            self.assertIn("PIV-CRED-001", {f["id"] for f in rep["findings"]})
+
+    def test_recovery_does_not_scale_with_file_size(self):
+        # Key recovery used to run over the whole body -- 256 trial decodes per
+        # column -- which cost 19 seconds on a 100 KB file. It runs on an 8 KB
+        # sample now; column alignment is identical because the sample starts
+        # at offset 0. Asserted as a loose ceiling rather than a benchmark.
+        import time
+        path = self._big_obfuscated(b"\x3b", repeats=60)
+        start = time.time()
+        rep = pivscan.scan(path)
+        elapsed = time.time() - start
+        self.assertTrue(rep["obfuscation"]["detected"])
+        self.assertLess(elapsed, 15, "deobfuscation is pathologically slow again")
+
+    def test_decode_surfaces_a_candidate_auto_detect_declines(self):
+        # Auto-decode needs two distinct property names; `decode` has no such
+        # gate, which is the point of having both.
+        path = os.path.join(self.dir, "thin.piv")
+        body = b""
+        for _ in range(50):
+            body += "HostName=a".encode("utf-16-le") + b"\x01\x00"
+        with open(path, "wb") as fh:
+            fh.write(b"PRO4VS" + pivscan.xor_bytes(body, b"\x3b"))
+
+        self.assertFalse(pivscan.scan(path)["obfuscation"]["detected"])
+        cands = pivscan.deobfuscate_candidates(
+            pivscan.read_file(path), skip=pivscan.header_skip(pivscan.read_file(path)))
+        self.assertEqual(cands[0]["transform"], "xor:3b")
+
+    def test_text_score_rewards_property_names(self):
+        plain = pivscan.text_score(b"HostName=a\r\nProivPassword=b\r\nDebugTrace=1\r\n")
+        noise = pivscan.text_score(b"qqqqqqqqqq wwwwwwwwww eeeeeeeeee")
+        self.assertGreater(len(plain["keyword_hits"]), 2)
+        self.assertEqual(noise["keyword_hits"], [])
+        self.assertGreater(plain["score"], noise["score"])
 
 
 class TestFormatCharacterisation(FixtureCase):

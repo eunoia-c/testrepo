@@ -187,23 +187,64 @@ def try_hex(value):
     return None
 
 
-def try_single_byte_xor(raw):
+COMMON_BIGRAMS = (b"th", b"he", b"in", b"er", b"an", b"re", b"on", b"at", b"en",
+                  b"nd", b"ti", b"es", b"or", b"te", b"of", b"ed", b"is", b"it",
+                  b"al", b"ar", b"st", b"to", b"nt", b"ng", b"se", b"ha", b"as",
+                  b"ou", b"io", b"le", b"ve", b"co", b"me", b"de", b"hi", b"ri",
+                  b"ro", b"ic", b"ne", b"ea", b"ra", b"ce", b"li", b"ch", b"ll",
+                  b"be", b"ma", b"si", b"om", b"ur")
+
+
+def plaintext_likeness(cand):
+    """Rough 'does this look like a human-written value' score.
+
+    Needed because the brute forces below used to return the first N printable
+    results in key order, and plenty of wrong keys produce printable garbage.
+    A high-numbered correct key was pushed off the list by low-numbered noise:
+    with the real key 0x5A, the five keys returned were 0x01-0x05 and the
+    answer never appeared. Rank first, cap second.
+    """
+    score = 0
+    runs = re.findall(rb"[A-Za-z]{2,}", cand)
+    score += sum(len(r) * len(r) for r in runs)          # long letter runs dominate
+    score += 3 * len(re.findall(rb"[A-Za-z][a-z]{2,}", cand))   # word-shaped
+    score -= 2 * len(re.findall(rb"[^\x20-\x7e]", cand))        # unprintables hurt
+    score -= len(re.findall(rb"[!-/:-@\[-`{-~]{3,}", cand))     # punctuation soup
+
+    # Letter-run shape alone cannot separate "Winter" from "Uklvgp" -- both are
+    # six letters and both look word-shaped. English bigrams can, and they are
+    # what makes the correct key rank first rather than merely appear.
+    low = cand.lower()
+    score += 4 * sum(low.count(bg) for bg in COMMON_BIGRAMS)
+    for run in runs:
+        vowels = sum(run.lower().count(v) for v in b"aeiou")
+        if vowels == 0:
+            score -= len(run)                # no vowels in a long run: not a word
+    return score
+
+
+def _ranked(hits, limit):
+    hits.sort(key=lambda kv: -plaintext_likeness(kv[1]))
+    return [(k, v.decode("ascii", "replace")) for k, v in hits[:limit]]
+
+
+def try_single_byte_xor(raw, limit=5):
     """Classic 'encrypted and stored in the file' = single byte XOR. Check it."""
     hits = []
     for key in range(1, 256):
         cand = bytes(c ^ key for c in raw)
         if looks_printable(cand, 0.95) and re.search(rb"[A-Za-z]{3,}", cand):
-            hits.append((key, cand.decode("ascii", "replace")))
-    return hits[:5]
+            hits.append((key, cand))
+    return _ranked(hits, limit)
 
 
-def try_rot_add(raw):
+def try_rot_add(raw, limit=3):
     hits = []
     for shift in range(1, 256):
         cand = bytes((c + shift) & 0xFF for c in raw)
         if looks_printable(cand, 0.95) and re.search(rb"[A-Za-z]{3,}", cand):
-            hits.append((shift, cand.decode("ascii", "replace")))
-    return hits[:3]
+            hits.append((shift, cand))
+    return _ranked(hits, limit)
 
 
 def analyse_secret_value(value):
@@ -240,6 +281,370 @@ def analyse_secret_value(value):
         seen.add(plain)
         uniq.append((scheme, plain))
     return uniq[:8]
+
+
+# ---------------------------------------------------------------------------
+# Whole-file deobfuscation
+# ---------------------------------------------------------------------------
+# A real PIV turned out to be UTF-16LE text XOR'd with a single byte, behind a
+# plaintext magic. Every rule in this tool runs over extracted strings, so a
+# byte-wise transform makes the file read as perfectly clean -- zero strings,
+# zero findings. That is the worst possible failure for a scanner: silence that
+# looks like a pass.
+#
+# The good news is that this class of obfuscation gives up its key for free.
+# In UTF-16LE text every ASCII character is stored as XX 00, so the most common
+# plaintext byte is 0x00 -- which means the most common CIPHERTEXT byte *is*
+# the key. No brute force needed, and the same trick recovers a repeating
+# multi-byte key column by column.
+
+# Property names seen in PROIV session files. Used to score a candidate
+# decode: text that looks like English is encouraging, text that names actual
+# session properties is proof.
+PROIV_KEYWORDS = [
+    b"proiv", b"hostname", b"username", b"password", b"sessiontype", b"telnet",
+    b"version", b"remember", b"prompt", b"security", b"runtime", b"interface",
+    b"toolbar", b"default", b"properties", b"application", b"definitions",
+    b"appdef", b"script", b"xfer", b"upload", b"download", b"transfer",
+    b"trace", b"debug", b"logfile", b"font", b"colour", b"color", b"connect",
+    b"server", b"port", b"proxy", b"connector", b"openclient", b"session",
+    b"customis", b"customiz", b"lockdown", b"timeout", b"keyboard", b"printer",
+]
+
+
+def flatten_text(data, min_len=4):
+    """All recoverable text in one lowercase blob, for scoring."""
+    return b" ".join(
+        t.encode("latin-1", "replace").lower()
+        for _, _, t in extract_strings(data, min_len)
+    )
+
+
+def text_score(data):
+    """How much readable configuration does this byte string contain?
+
+    Two things here are not obvious and both were learned the hard way.
+
+    A UTF-16LE character occupies two bytes but counts as one extracted
+    character, while ASCII counts one per byte. Summing raw character counts
+    therefore scores printable garbage at roughly double a correct UTF-16
+    decode: on a 100 KB session file the right key scored 51,930 and a wrong
+    one 101,789, and no amount of keyword weighting closed a gap that size.
+    So coverage is measured in BYTES accounted for, and normalised by file
+    length so the number means the same thing at any size.
+
+    And keyword hits are not a bonus, they are the decision. "Looks like text"
+    is cheap -- XOR-ing with any byte in the printable range produces text.
+    "Names actual PROIV session properties" is what distinguishes a decode from
+    a coincidence, so one keyword outweighs total coverage.
+    """
+    strings = extract_strings(data, 4)
+    ascii_chars = sum(len(t) for _, enc, t in strings if enc == "ascii")
+    utf16_chars = sum(len(t) for _, enc, t in strings if enc == "utf-16le")
+    flat = b" ".join(t.encode("latin-1", "replace").lower() for _, _, t in strings)
+    hits = sorted({k.decode() for k in PROIV_KEYWORDS if k in flat})
+    coverage = (ascii_chars + 2 * utf16_chars) / max(len(data), 1)
+    return {
+        "score": 1000 * len(hits) + int(1000 * min(coverage, 1.0)),
+        "keyword_hits": hits,
+        "coverage": round(coverage, 3),
+        "ascii_chars": ascii_chars,
+        "utf16_chars": utf16_chars,
+        "string_count": len(strings),
+    }
+
+
+def xor_bytes(data, key):
+    if not key:
+        return bytes(data)
+    n = len(key)
+    return bytes(b ^ key[i % n] for i, b in enumerate(data))
+
+
+def add_bytes(data, k):
+    return bytes((b + k) & 0xFF for b in data)
+
+
+def smallest_period(key):
+    """xor:3b3b3b is xor:3b. Collapse it so the candidate list is not padded
+    with the same answer at four different lengths."""
+    n = len(key)
+    for plen in range(1, n + 1):
+        if n % plen == 0 and key == key[:plen] * (n // plen):
+            return key[:plen]
+    return key
+
+
+def recover_xor_key_modal(data, klen):
+    """Modal byte per column -- the cheap version.
+
+    For UTF-16LE text the most common plaintext byte is 0x00, so the most
+    common ciphertext byte in a column is the key byte for that column. It is
+    the classic 'null bytes leak the keystream' observation and it solves the
+    single-byte case outright.
+
+    It has one blind spot, which is why recover_xor_key_columns exists: with an
+    EVEN key length every null in UTF-16LE text lands in the same column, so
+    the other columns contain no nulls at all and their modal byte is just the
+    commonest character -- a wrong key byte. A 2-byte key defeats this method
+    half-way and the candidate never surfaces.
+    """
+    key = bytearray()
+    for r in range(klen):
+        col = data[r::klen]
+        if not col:
+            return None
+        key.append(Counter(col).most_common(1)[0][0])
+    return bytes(key)
+
+
+def _column_key_byte(col):
+    """Best single key byte for one column of a repeating-XOR ciphertext.
+
+    Columns are independent under a repeating key, so each can be solved on its
+    own -- 256 tries per column instead of 256**klen for the whole key. Scoring
+    accepts the two shapes a legitimate column takes in a PIV: mostly printable
+    (the character halves of UTF-16LE, or plain ASCII) or mostly 0x00 (the null
+    halves). Nulls are weighted highest because a column of them is unambiguous.
+    """
+    scored = []
+    for k in range(256):
+        dec = bytes(b ^ k for b in col)
+        score = 0
+        for b in dec:
+            if b == 0x00:
+                score += 3
+            elif b in PRINTABLE or b in (0x09, 0x0A, 0x0D):
+                score += 1
+            else:
+                score -= 2
+        scored.append((score, k, dec))
+
+    # Printability cannot resolve the last bit: with the true key 0x3b, trying
+    # 0x3a turns every 'C' into 'B' and the column is still perfectly
+    # printable, so the two tie and the lower key wins by accident. Break ties
+    # linguistically -- under an even-length key the character column is the
+    # plaintext in reading order, so English bigrams separate "CustomToolBar"
+    # from "BtrunlUnnm" cleanly.
+    top = max(sc for sc, _, _ in scored)
+    margin = max(1, abs(top) // 50)
+    close = [(k, dec) for sc, k, dec in scored if sc >= top - margin]
+    if len(close) == 1:
+        return close[0][0]
+    return max(close, key=lambda kd: plaintext_likeness(kd[1]))[0]
+
+
+def recover_xor_key_columns(data, klen):
+    """Per-column recovery. Handles any key length, even or odd."""
+    key = bytearray()
+    for r in range(klen):
+        col = data[r::klen]
+        if not col:
+            return None
+        key.append(_column_key_byte(col))
+    return bytes(key)
+
+
+REFINE_MAX_KEYLEN = 4
+# Refinement is the expensive step -- klen * 256 whole-file scorings per round.
+# Two bounds keep it honest: only the few best cheap candidates are refined,
+# and only against a sample of the body. Property names cluster at the start of
+# a session file, so a sample is as informative as the whole thing and the cost
+# stops growing with file size.
+REFINE_CANDIDATES = 3
+REFINE_SAMPLE = 8 * 1024
+REFINE_SKIP_IF_KEYWORDS = 5
+
+# Candidate SEARCH also scores against a sample rather than the whole file.
+# Without this the cheap pass alone is 510 full-file scorings, which on a 44 KB
+# session file took 13 seconds -- all of it spent proving that 509 wrong keys
+# are wrong. The winner is re-scored against the full file afterwards, so the
+# numbers in the report are not sampled.
+SCORE_SAMPLE = 8 * 1024
+
+
+def refine_key(body, key, rounds=2):
+    """Hill-climb a recovered key against whole-file keyword scoring.
+
+    Per-column scoring gets the key *almost* right and then loses to local
+    noise: structure bytes (the 0x01 field separators) landing in a character
+    column pull it one bit off, because turning them into 0x00 scores better
+    locally than leaving them as 0x01. No amount of per-column cleverness fixes
+    that -- the information that settles it is "hostname" being a word and
+    "gostname" not, which only exists at whole-file level.
+
+    So: take the per-column estimate as a starting point and greedily improve
+    one column at a time against text_score, which counts recovered PROIV
+    property names. Columns are independent under a repeating key, so this
+    converges in one or two passes.
+    """
+    key = bytearray(key)
+    for _ in range(rounds):
+        changed = False
+        for r in range(len(key)):
+            original = key[r]
+            best_k, best_s = original, None
+            for k in range(256):
+                key[r] = k
+                sc = text_score(xor_bytes(body, bytes(key)))["score"]
+                if best_s is None or sc > best_s:
+                    best_s, best_k = sc, k
+            key[r] = best_k
+            if best_k != original:
+                changed = True
+        if not changed:
+            break
+    return bytes(key)
+
+
+def parse_spec(spec):
+    """'xor:3b', 'xor:3b2f', 'add:05', 'none' -> ('xor', b'\x3b')."""
+    if not spec or spec == "none":
+        return ("none", b"")
+    kind, _, val = spec.partition(":")
+    kind = kind.lower()
+    if kind == "xor":
+        return ("xor", bytes.fromhex(val))
+    if kind == "add":
+        return ("add", bytes([int(val, 16) & 0xFF]))
+    raise ValueError("unknown transform spec: %s" % spec)
+
+
+def format_spec(kind, key):
+    if kind == "none":
+        return "none"
+    return "%s:%s" % (kind, binascii.hexlify(key).decode())
+
+
+def apply_transform(data, kind, key):
+    if kind == "xor":
+        return xor_bytes(data, key)
+    if kind == "add":
+        # Decoding an additive cipher means subtracting.
+        return add_bytes(data, (-key[0]) & 0xFF)
+    return bytes(data)
+
+
+def deobfuscate_candidates(data, skip=0, top=5):
+    """Rank plausible whole-file transforms best-first.
+
+    `skip` leaves a plaintext header alone -- a magic like PRO4VS sits outside
+    the obfuscation because the client has to read it to identify the file, and
+    including it would poison the modal-byte statistics.
+    """
+    body = data[skip:]
+    search_body = body[:SCORE_SAMPLE]
+    seen, cands = set(), []
+
+    def add(kind, key):
+        spec = format_spec(kind, key)
+        if spec in seen:
+            return
+        seen.add(spec)
+        info = text_score(apply_transform(search_body, kind, key))
+        info.update({"transform": spec, "kind": kind, "key": key})
+        cands.append(info)
+
+    # Cheap pass: every single-byte transform, plus one recovered key per
+    # length from each method.
+    add("none", b"")
+    for k in range(1, 256):
+        add("xor", bytes([k]))
+        add("add", bytes([k]))
+    # Key recovery runs on the sample too. _column_key_byte tries all 256 keys
+    # against every byte of its column, so recovering 8 key lengths from a
+    # 104 KB file meant ~27 MB of byte operations per length and took 19
+    # seconds -- while 8 KB is already far more than enough to recover a key of
+    # 8 bytes or less. The sample starts at offset 0, so column alignment is
+    # identical to the full body.
+    recovered = []
+    for klen in range(1, 9):
+        for recover in (recover_xor_key_columns, recover_xor_key_modal):
+            key = recover(search_body, klen)
+            if key and any(key):
+                key = smallest_period(key)
+                add("xor", key)
+                if len(key) <= REFINE_MAX_KEYLEN and key not in recovered:
+                    recovered.append(key)
+
+    cands.sort(key=lambda c: -c["score"])
+
+    # Expensive pass, only if the cheap one did not already recover plenty of
+    # property names.
+    best_cheap = next((c for c in cands if c["kind"] != "none"), None)
+    if best_cheap and len(best_cheap["keyword_hits"]) < REFINE_SKIP_IF_KEYWORDS:
+        for key in recovered[:REFINE_CANDIDATES]:
+            add("xor", smallest_period(refine_key(body[:REFINE_SAMPLE], key)))
+        cands.sort(key=lambda c: -c["score"])
+
+    # Re-score the shortlist against the whole file so the reported string and
+    # keyword counts describe the real thing, not the sample.
+    out = []
+    for c in cands[:top]:
+        full = text_score(apply_transform(body, c["kind"], c["key"]))
+        full.update({"transform": c["transform"], "kind": c["kind"], "key": c["key"]})
+        out.append(full)
+    out.sort(key=lambda c: -c["score"])
+    return out
+
+
+# A decode is only accepted automatically when it is not a close call: it has
+# to name real PROIV properties that the raw file does not. Anything less is
+# reported as a candidate for the tester to judge, never applied silently.
+#
+# Note what is deliberately NOT a gate here: "the decoded text scores N times
+# higher than the raw file". XOR-ing UTF-16LE with a byte in the 0x20-0x7e
+# range leaves the ciphertext fully printable, so the raw file already scores
+# well on text volume and a ratio test rejects the correct decode. Recovered
+# property names are the only signal that separates text from configuration.
+AUTO_DECODE_MIN_KEYWORDS = 2
+
+
+def detect_obfuscation(data, skip=0):
+    """Return (decision, candidates). decision is None when the raw file is
+    already readable or nothing convincing was found."""
+    cands = deobfuscate_candidates(data, skip=skip)
+    raw = next((c for c in cands if c["kind"] == "none"), None)
+    if raw is None:
+        raw = text_score(data[skip:])
+        raw.update({"transform": "none", "kind": "none", "key": b""})
+    best = next((c for c in cands if c["kind"] != "none"), None)
+    if best is None:
+        return None, cands
+    if len(best["keyword_hits"]) < AUTO_DECODE_MIN_KEYWORDS:
+        return None, cands
+    if len(best["keyword_hits"]) <= len(raw["keyword_hits"]):
+        return None, cands
+    if best["score"] <= raw["score"]:
+        return None, cands
+    return best, cands
+
+
+MAGIC_RE = re.compile(rb"^[A-Za-z][A-Za-z0-9_.+-]{2,15}")
+
+
+def header_skip(data, limit=16):
+    """Length of the leading plaintext magic, so it is not fed to key recovery.
+
+    "walk while the byte is printable" does not work here, which is the whole
+    difficulty: XOR'd UTF-16LE text is *also* printable, so that walk runs
+    straight past the magic and into the body (PRO4VS became PRO4VSx;N;H;O...).
+
+    So: match a magic-shaped token, then cut it short where the obfuscation's
+    rhythm begins. The body of XOR'd UTF-16LE alternates char, KEY, char, KEY,
+    so the first occurrence of the file's modal byte is the first lit-up null,
+    one byte into the body.
+    """
+    m = MAGIC_RE.match(data)
+    if not m:
+        return 0
+    run = m.end()
+    if data:
+        modal = Counter(data).most_common(1)[0][0]
+        idx = data.find(bytes([modal]))
+        if 4 < idx <= limit + 1:
+            return min(run, idx - 1)
+    return run if run <= limit else 0
 
 
 # ---------------------------------------------------------------------------
@@ -805,24 +1210,68 @@ def adjust_severity(sev, steps):
     return SEV_SCALE[i]
 
 
-def scan(path, min_len=4, show_all_strings=False, context="internal"):
-    data = read_file(path)
+def scan(path, min_len=4, show_all_strings=False, context="internal",
+         auto_decode=True, spec=None):
+    raw = read_file(path)
+    skip = header_skip(raw)
+
+    # Decode first, then run everything else over the plaintext. A byte-wise
+    # transform preserves length, so offsets reported below still point at the
+    # right place in the ORIGINAL file -- which is what you need in a hex
+    # editor.
+    obf = None
+    if spec:
+        kind, key = parse_spec(spec)
+        decoded_body = apply_transform(raw[skip:], kind, key)
+        info = text_score(decoded_body)
+        info.update({"transform": format_spec(kind, key), "kind": kind,
+                     "key": key, "source": "user-specified"})
+        obf = info
+        data = raw[:skip] + decoded_body
+    elif auto_decode:
+        decision, cands = detect_obfuscation(raw, skip=skip)
+        if decision:
+            decision = dict(decision, source="auto-detected")
+            obf = decision
+            data = raw[:skip] + apply_transform(raw[skip:], decision["kind"],
+                                                decision["key"])
+        else:
+            data = raw
+            obf = None
+        obf_candidates = cands
+    else:
+        data = raw
+
     strings = extract_strings(data, min_len)
     kv = extract_kv(strings)
 
     report = OrderedDict()
     report["tool"] = "pivscan %s" % VERSION
     report["file"] = os.path.abspath(path)
-    report["size"] = len(data)
-    report["sha_like_prefix"] = binascii.hexlify(data[:16]).decode()
-    report["overall_entropy"] = round(shannon_entropy(data), 3)
+    report["size"] = len(raw)
+    report["sha_like_prefix"] = binascii.hexlify(raw[:16]).decode()
+    report["overall_entropy"] = round(shannon_entropy(raw), 3)
+    report["header"] = raw[:skip].decode("ascii", "replace") if skip else ""
+    if obf:
+        report["obfuscation"] = {
+            "detected": True,
+            "transform": obf["transform"],
+            "source": obf.get("source", "auto-detected"),
+            "keywords_recovered": obf["keyword_hits"],
+            "strings_after_decode": obf["string_count"],
+            "header_left_as_is": report["header"],
+            "note": ("Findings below are from the DECODED bytes. Offsets are "
+                     "unchanged, so they still address the original file."),
+        }
+    else:
+        report["obfuscation"] = {"detected": False}
     report["context"] = context
     report["string_count"] = len(strings)
     report["kv_count"] = len(kv)
 
     # --- format characterisation -------------------------------------------
-    printable_ratio = sum(1 for b in data if b in PRINTABLE or b in (9, 10, 13)) / max(
-        len(data), 1
+    printable_ratio = sum(1 for b in raw if b in PRINTABLE or b in (9, 10, 13)) / max(
+        len(raw), 1
     )
     if printable_ratio > 0.85:
         fmt = "predominantly text (INI/KV-like) - edit directly in a text editor"
@@ -855,7 +1304,7 @@ def scan(path, min_len=4, show_all_strings=False, context="internal"):
     # --- high entropy regions ----------------------------------------------
     hot = [
         {"offset": o, "length": l, "entropy": round(e, 2)}
-        for o, l, e in entropy_map(data)
+        for o, l, e in entropy_map(raw)
         if e > 7.2
     ]
     report["high_entropy_regions"] = hot[:40]
@@ -967,6 +1416,14 @@ def render(report):
         report.get("context", "internal"),
         " (severities calibrated for an internal thick-client engagement)"
         if report.get("context") == "internal" else ""))
+    obf = report.get("obfuscation") or {}
+    if obf.get("detected"):
+        a(" Obfuscation       : DEFEATED - %s (%s)" % (obf["transform"], obf["source"]))
+        a("                     plaintext header left as-is: %r"
+          % (obf.get("header_left_as_is") or ""))
+        a("                     recovered property names: %s"
+          % ", ".join(obf["keywords_recovered"][:10]))
+        a("                     %s" % obf["note"])
     a(" Strings / KV pairs: %d / %d" % (report["string_count"], report["kv_count"]))
     a(
         " Integrity field   : %s"
@@ -1064,6 +1521,14 @@ def render(report):
     a("     document the phishing scenario (user opens attacker-supplied .piv ->")
     a("     client auto-connects to attacker host -> stored credential transmitted).")
     a("")
+    if not report["findings"] and not obf.get("detected"):
+        a(" NOTHING MATCHED - before concluding the file is clean, try:")
+        a("   pivscan decode session.piv            # rank candidate transforms")
+        a("   pivscan decode session.piv --out plain.bin && pivscan scan plain.bin")
+        a(" A real PIV can be UTF-16LE text under a byte-wise XOR behind a plaintext")
+        a(" magic, which defeats every string-based rule in this tool. Auto-detection")
+        a(" only accepts a decode it is confident about; 'decode' shows the rest.")
+        a("")
     a(" CAVEATS: the PIV layout is proprietary and version-dependent. Keyword hits")
     a(" are leads, not proof. An empty result does not mean the file is clean - an")
     a(" opaque binary PIV hides everything from a string scan, which is exactly")
@@ -1215,6 +1680,62 @@ def carve(path, outdir):
 # ---------------------------------------------------------------------------
 
 
+def decode_report(path, spec=None, out=None, top=5):
+    raw = read_file(path)
+    skip = header_skip(raw)
+    L = []
+    a = L.append
+    a(BAR)
+    a(" pivscan decode - whole-file transform recovery")
+    a(BAR)
+    a(" File   : %s (%d bytes)" % (path, len(raw)))
+    a(" Header : %r (left out of key recovery)" % raw[:skip].decode("ascii", "replace"))
+    a("")
+
+    if spec:
+        kind, key = parse_spec(spec)
+        body = apply_transform(raw[skip:], kind, key)
+        info = text_score(body)
+        a(" Applied %s as instructed." % format_spec(kind, key))
+        a("   strings recovered : %d" % info["string_count"])
+        a("   property names    : %s" % (", ".join(info["keyword_hits"]) or "none"))
+        chosen = raw[:skip] + body
+    else:
+        cands = deobfuscate_candidates(raw, skip=skip, top=top)
+        a(" Candidate transforms, best first:")
+        a("")
+        a("   %-14s %8s %7s %7s  %s" % ("transform", "score", "strings", "names", "property names found"))
+        for c in cands:
+            a("   %-14s %8d %7d %7d  %s" % (
+                c["transform"], c["score"], c["string_count"],
+                len(c["keyword_hits"]), ", ".join(c["keyword_hits"][:6]) or "-"))
+        a("")
+        best = cands[0] if cands else None
+        if best and best["kind"] != "none" and len(best["keyword_hits"]) >= 2:
+            a(" Best candidate recovers real PROIV property names, so the file is")
+            a(" obfuscated rather than opaque. How the key was recovered, in case you")
+            a(" need to do this by hand: in UTF-16LE text every ASCII character is")
+            a(" stored as XX 00, so the most common plaintext byte is 0x00 -- which")
+            a(" makes the most common CIPHERTEXT byte the key itself. The '::;;' or")
+            a(" ';;;;' rhythm in a strings dump is exactly those lit-up null bytes.")
+            chosen = raw[:skip] + apply_transform(raw[skip:], best["kind"], best["key"])
+        else:
+            a(" No candidate recovered recognisable PROIV properties. The file may use")
+            a(" a stream cipher, compression, or a structure this tool does not model.")
+            a(" Fall back to the known-plaintext diff workflow.")
+            chosen = None
+
+    if out and chosen is not None:
+        with open(out, "wb") as fh:
+            fh.write(chosen)
+        a("")
+        a(" Decoded bytes written to %s" % out)
+        a(" Offsets are unchanged, so they still address the original file.")
+        a(" Next: pivscan scan %s" % out)
+    a(BAR)
+    return "\n".join(L)
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Static insecurity scanner for PROIV Client .PIV session files",
@@ -1233,6 +1754,11 @@ def main():
         default="internal",
         help="deployment context for severity calibration; 'raw' disables adjustment",
     )
+    s.add_argument("--no-auto-decode", action="store_true",
+                   help="do not attempt whole-file deobfuscation before scanning")
+    s.add_argument("--spec",
+                   help="apply a known transform instead of detecting one, "
+                        "e.g. xor:3b, xor:3b2f, add:05")
 
     st = sub.add_parser("strings", help="dump ASCII + UTF-16LE strings with offsets")
     st.add_argument("file")
@@ -1242,6 +1768,12 @@ def main():
     d.add_argument("before")
     d.add_argument("after")
 
+    dc = sub.add_parser("decode", help="recover a whole-file XOR/add transform")
+    dc.add_argument("file")
+    dc.add_argument("--spec", help="apply this transform instead of detecting one")
+    dc.add_argument("--out", help="write the decoded bytes here")
+    dc.add_argument("--top", type=int, default=5, help="candidates to list")
+
     c = sub.add_parser("carve", help="extract embedded blobs and high-entropy regions")
     c.add_argument("file")
     c.add_argument("--out", default="./carved")
@@ -1249,12 +1781,16 @@ def main():
     args = p.parse_args()
 
     if args.cmd == "scan":
-        rep = scan(args.file, args.min_len, args.all_strings, args.context)
+        rep = scan(args.file, args.min_len, args.all_strings, args.context,
+                   auto_decode=not args.no_auto_decode, spec=args.spec)
         print(render(rep))
         if args.json_out:
             with open(args.json_out, "w") as fh:
                 json.dump(rep, fh, indent=2)
             print("\nJSON written to %s" % args.json_out)
+
+    elif args.cmd == "decode":
+        print(decode_report(args.file, args.spec, args.out, args.top))
 
     elif args.cmd == "strings":
         for off, enc, text in extract_strings(read_file(args.file), args.min_len):

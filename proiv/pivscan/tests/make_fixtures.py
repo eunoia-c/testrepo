@@ -92,6 +92,37 @@ def binary_piv(version=501, pw=PLAIN_PW):
     return b"".join(parts)
 
 
+def obfuscated_piv(key=0x3B, magic=b"PRO4VS"):
+    """A PIV shaped like the ones seen in the field: a plaintext magic followed
+    by UTF-16LE property text XOR'd with a single byte.
+
+    This is the case that made the whole string-based scanner report a clean
+    file. In UTF-16LE every ASCII character is XX 00, so XOR-ing with 0x3B lits
+    up each null as ';' -- which is why a strings dump of such a file looks
+    like ';N;H;O;T' rather than like noise.
+    """
+    fields = [
+        "CustomToolBar",
+        "DefaultWallpaper",
+        "HostName=proiv-app03.corp.internal",
+        "Port=23",
+        "SessionType=Telnet",
+        "ProivUserName=operator",
+        "ProivPassword=" + PLAIN_PW,
+        "RememberUsernameAndPassword=1",
+        "PromptForSecurity=0",
+        "ActivateUserRuntimeInterface=1",
+        "ApplicationDefinitions=\\\\fileserver02\\proiv$\\appdef.ini",
+        "XferIn=MENU=ADMIN",
+        "DebugTrace=1",
+    ]
+    body = bytearray()
+    for f in fields:
+        body += utf16(f)
+        body += b"\x01\x00"          # the 0x01 structure bytes between fields
+    return magic + bytes(b ^ key for b in body)
+
+
 def write(outdir):
     os.makedirs(outdir, exist_ok=True)
     made = {}
@@ -109,6 +140,14 @@ def write(outdir):
     # A PIV with no recognisable settings at all, to prove the tool says
     # "nothing matched" rather than inventing findings.
     made["empty.piv"] = b"PIV\x00" + struct.pack("<I", 500) + b"\x00" * 256
+
+    # The field case: obfuscated, and a second one under a repeating 2-byte key
+    # to prove column-wise recovery is not limited to single-byte keys.
+    made["obfuscated.piv"] = obfuscated_piv()
+    made["obfuscated_multibyte.piv"] = (
+        b"PRO4VS" + bytes(
+            b ^ (0x3B, 0x2F)[i % 2]
+            for i, b in enumerate(obfuscated_piv(key=0x00)[6:])))
 
     for name, data in made.items():
         with open(os.path.join(outdir, name), "wb") as fh:

@@ -29,11 +29,84 @@ credentials there before the user touches anything. Every other finding in a
 PIV is amplified by this delivery vector, which is why the integrity question
 is checked first.
 
+## It is probably obfuscated, and that is recoverable
+
+Run `strings` on a real PIV and you may get something like this:
+
+```
+PRO4VSx;N;H;O;T;V;o;T;T;W;y;Z;I;
+```
+
+That is not binary noise and it is not a separator-delimited format. It is
+**UTF-16LE text XOR'd with a single byte, behind a plaintext magic**. XOR with
+`0x3b` and it reads `CustomToolBar`.
+
+The `;` characters are the tell. In UTF-16LE every ASCII character is stored as
+`XX 00`, so a file full of `0x00` bytes XOR'd with `0x3b` shows `;` at every
+other position — the nulls, lit up. An occasional `:` is a plaintext `0x01`,
+the structure bytes between string fields. That rhythm, `;X;X;X`, is the
+signature of this whole class of obfuscation.
+
+Two consequences:
+
+**The key is free.** Never brute-force a file like this. The most common
+plaintext byte in UTF-16LE text is `0x00`, so the most common *ciphertext* byte
+**is the key**. `recover_xor_key_modal` is that one-liner. For repeating
+multi-byte keys the columns are independent, so each is solved on its own
+(`recover_xor_key_columns`) — 256 tries per column instead of 256^n for the
+whole key.
+
+**The magic stays plaintext.** The client has to read it to identify the file,
+so it sits outside the obfuscation. `header_skip` keeps it out of key recovery,
+where it would poison the statistics. Note that "advance while the byte is
+printable" does **not** find it — XOR'd UTF-16LE is printable too, so that walk
+runs straight past `PRO4VS` and into the body.
+
+### What `scan` does about it
+
+`scan` auto-decodes before doing anything else, and says so loudly:
+
+```
+ Obfuscation       : DEFEATED - xor:3b (auto-detected)
+                     plaintext header left as-is: 'PRO4VS'
+                     recovered property names: appdef, application, debug, default, ...
+                     Findings below are from the DECODED bytes. Offsets are
+                     unchanged, so they still address the original file.
+```
+
+A byte-wise transform preserves length, so **every offset in the report still
+addresses the file on disk** — paste it straight into a hex editor.
+
+Auto-decode is deliberately conservative: it requires at least two distinct
+PROIV property names that the raw file does not contain. It is never applied
+silently, and `--no-auto-decode` turns it off. What it explicitly does *not*
+use as a gate is "the decoded text scores much higher than the raw file" —
+XOR-ing UTF-16LE with any byte in the printable range leaves the ciphertext
+fully printable, so the raw file already scores well on text volume and a ratio
+test rejects the correct answer.
+
+Use `decode` when `scan` declines. It has no keyword gate, ranks every
+candidate, explains how the key was recovered, and will write the decoded bytes
+out with `--out` for your own `strings`/hex work:
+
+```
+   transform         score strings   names  property names found
+   xor:3b             1397      13      22  appdef, application, debug, default, ...
+   xor:32              600      19       0  -
+```
+
+If no candidate recovers recognisable properties, it says so rather than
+guessing — then it is a stream cipher, compression, or a structure this tool
+does not model, and the diff workflow is the way in.
+
 ## Usage
 
 ```bash
 python3 pivscan.py scan    session.piv [--json out.json] [--min-len 4] [--all-strings]
 python3 pivscan.py scan    session.piv --context raw     # no severity calibration
+python3 pivscan.py scan    session.piv --spec xor:3b     # apply a known transform
+python3 pivscan.py scan    session.piv --no-auto-decode  # scan the raw bytes
+python3 pivscan.py decode  session.piv [--out plain.bin] [--spec xor:3b] [--top 5]
 python3 pivscan.py strings session.piv [--min-len 4]
 python3 pivscan.py diff    before.piv after.piv
 python3 pivscan.py carve   session.piv --out ./carved
@@ -148,20 +221,29 @@ not appear under *credential-shaped values*. On a binary PIV, use `carve` plus
 the known-plaintext diff workflow instead. (Pinned by
 `test_known_gap_binary_obfuscated_secret_is_missed`.)
 
-**The XOR brute force can hide the right answer.** `try_single_byte_xor` walks
-keys 1→255 and returns the first five printable-looking results. Since many
-wrong keys look printable, a high-numbered correct key is pushed off the list
-by low-numbered noise — key `0x5A` does not survive the cap. The search finds
-it; the cap, applied before any ranking, discards it. Treat the xor/add
-candidates as leads only and fall back to the diff method. (Pinned by
-`test_known_gap_xor_cap_can_hide_the_right_key`.)
+Note this does **not** apply to the obfuscated-UTF-16 case above: once decoded,
+such a file *is* text, so `ProivPassword=` is recovered with its value and the
+credential analysis runs normally.
+
+**Auto-decode needs two property names.** A PIV holding only one recognisable
+property (or using names this tool does not know) will not be decoded
+automatically — the gate exists so a plausible-looking wrong key is never
+applied behind your back. `decode` has no such gate and will still rank it
+first; check there before concluding a file is opaque.
+
+**Deobfuscation only models byte-wise transforms.** Repeating XOR and additive
+shifts are covered. A stream cipher, a block cipher, compression, or a
+position-dependent scheme is not, and no amount of key recovery will touch it.
+The diff workflow is the fallback and will tell you which of those you are
+looking at.
 
 **Keyword hits are leads, not proof.** `PIV-NET-006` and `PIV-UI-015` in
 particular match broadly by design; confirm before anything reaches a report.
 
 **An empty result does not mean the file is clean.** An opaque binary PIV hides
-everything from a string scan. That is what the diff workflow is for, and the
-report says so in its own caveats section.
+everything from a string scan. When nothing matches, the report now points at
+`decode` before it points at the diff workflow, because an obfuscated file is
+far more common than a genuinely opaque one.
 
 **The format is proprietary and version-dependent.** Encryption is signalled by
 the PIV service/version value (e.g. 501 encrypted vs 500 unencrypted) rather
@@ -171,7 +253,7 @@ across releases. Confirm against the client you are actually testing.
 ## Tests
 
 ```bash
-python3 -m unittest test_pivscan        # 69 tests
+python3 -m unittest test_pivscan        # 98 tests
 ```
 
 Fixtures are generated at run time by `tests/make_fixtures.py` — nothing
@@ -181,9 +263,18 @@ session with UTF-16LE strings and a single-byte-XOR password, a before/after
 pair differing by one known character, and an opaque PIV with nothing in it
 (to prove the tool reports "none matched" rather than inventing findings).
 
-Two tests assert **false negatives** on purpose, pinning the gaps documented
-above. If one of them starts failing, the gap has been fixed — delete the test
-and update the Limits section.
+Fixtures also include an obfuscated PIV (`PRO4VS` magic + XOR `0x3b` over
+UTF-16LE) and one under a repeating two-byte key, which is the case single-byte
+recovery alone cannot solve.
+
+Several tests exist only because the bug they guard against appeared at a size
+the small fixtures could not reach — scoring that preferred printable garbage
+to a correct UTF-16 decode, and key recovery whose cost grew with file size.
+Those assert behaviour on a ~100 KB generated file; keep them.
+
+One test asserts a **false negative** on purpose, pinning the binary-secret gap
+documented above. If it starts failing, the gap has been fixed — delete the
+test and update the Limits section.
 
 ## Posture
 
