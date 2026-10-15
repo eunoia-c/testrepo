@@ -516,6 +516,71 @@ class TestDeobfuscation(FixtureCase):
         self.assertGreater(plain["score"], noise["score"])
 
 
+class TestPlaintextOutput(FixtureCase):
+    def test_every_field_is_listed(self):
+        out = pivscan.render_plaintext(self.fx("obfuscated.piv"))
+        for field in ("CustomToolBar", "HostName=proiv-app03.corp.internal",
+                      "SessionType=Telnet", "ProivPassword=",
+                      "ActivateUserRuntimeInterface=1", "DebugTrace=1"):
+            self.assertIn(field, out)
+
+    def test_magic_is_shown_as_such(self):
+        out = pivscan.render_plaintext(self.fx("obfuscated.piv"))
+        self.assertIn("PRO4VS", out)
+        self.assertIn("magic", out)
+
+    def test_transform_is_named(self):
+        out = pivscan.render_plaintext(self.fx("obfuscated.piv"))
+        self.assertIn("xor:3b", out)
+        self.assertIn("auto-detected", out)
+
+    def test_offsets_match_the_original_file(self):
+        _raw, data, skip, _obf = pivscan.load_decoded(self.fx("obfuscated.piv"))
+        rows = pivscan.plaintext_lines(data, skip)
+        raw = pivscan.read_file(self.fx("obfuscated.piv"))
+        decoded = raw[:6] + pivscan.xor_bytes(raw[6:], b"\x3b")
+        for r in rows:
+            if r["encoding"] != "utf-16le":
+                continue
+            at = decoded[r["offset"]:r["offset"] + len(r["text"]) * 2]
+            self.assertEqual(at.decode("utf-16-le", "replace"), r["text"])
+
+    def test_field_boundaries_are_preserved(self):
+        # Gluing adjacent runs together would lose the field structure, which
+        # is the only structure a string-level view has.
+        _raw, data, skip, _obf = pivscan.load_decoded(self.fx("obfuscated.piv"))
+        rows = [r for r in pivscan.plaintext_lines(data, skip)
+                if r["encoding"] == "utf-16le"]
+        self.assertGreater(len(rows), 10)
+        self.assertNotIn("CustomToolBarDefaultWallpaper",
+                         " ".join(r["text"] for r in rows))
+
+    def test_hex_mode_renders_a_dump(self):
+        out = pivscan.render_plaintext(self.fx("obfuscated.piv"), as_hex=True)
+        self.assertIn("|PRO4VSC.u.s.t.o.|", out)
+
+    def test_plain_file_says_no_transform_applied(self):
+        out = pivscan.render_plaintext(self.fx("text.piv"))
+        self.assertIn("none applied", out)
+        self.assertIn("HostName=", out)
+
+    def test_scan_can_embed_the_plaintext(self):
+        rep = pivscan.scan(self.fx("obfuscated.piv"), show_plaintext=True)
+        self.assertIn("plaintext", rep)
+        rendered = pivscan.render(rep)
+        self.assertIn("DEOBFUSCATED CONTENTS", rendered)
+        self.assertIn("SessionType=Telnet", rendered)
+
+    def test_scan_omits_the_plaintext_by_default(self):
+        self.assertNotIn("plaintext", pivscan.scan(self.fx("obfuscated.piv")))
+
+    def test_load_decoded_is_consistent_with_scan(self):
+        raw, data, skip, obf = pivscan.load_decoded(self.fx("obfuscated.piv"))
+        self.assertEqual(len(raw), len(data))        # length-preserving
+        self.assertEqual(obf["transform"], "xor:3b")
+        self.assertEqual(skip, 6)
+
+
 class TestFormatCharacterisation(FixtureCase):
     def test_text_piv_identified_as_text(self):
         self.assertIn("text", pivscan.scan(self.fx("text.piv"))["format_guess"])

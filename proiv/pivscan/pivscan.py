@@ -1210,37 +1210,37 @@ def adjust_severity(sev, steps):
     return SEV_SCALE[i]
 
 
-def scan(path, min_len=4, show_all_strings=False, context="internal",
-         auto_decode=True, spec=None):
+def load_decoded(path, spec=None, auto_decode=True):
+    """Read a PIV and return (raw, decoded, skip, obf).
+
+    Everything downstream works on the decoded bytes. A byte-wise transform
+    preserves length, so offsets stay valid against the file on disk -- which
+    is what makes the output usable in a hex editor.
+    """
     raw = read_file(path)
     skip = header_skip(raw)
 
-    # Decode first, then run everything else over the plaintext. A byte-wise
-    # transform preserves length, so offsets reported below still point at the
-    # right place in the ORIGINAL file -- which is what you need in a hex
-    # editor.
-    obf = None
     if spec:
         kind, key = parse_spec(spec)
-        decoded_body = apply_transform(raw[skip:], kind, key)
-        info = text_score(decoded_body)
-        info.update({"transform": format_spec(kind, key), "kind": kind,
-                     "key": key, "source": "user-specified"})
-        obf = info
-        data = raw[:skip] + decoded_body
-    elif auto_decode:
-        decision, cands = detect_obfuscation(raw, skip=skip)
+        body = apply_transform(raw[skip:], kind, key)
+        obf = text_score(body)
+        obf.update({"transform": format_spec(kind, key), "kind": kind,
+                    "key": key, "source": "user-specified"})
+        return raw, raw[:skip] + body, skip, obf
+
+    if auto_decode:
+        decision, _cands = detect_obfuscation(raw, skip=skip)
         if decision:
-            decision = dict(decision, source="auto-detected")
-            obf = decision
-            data = raw[:skip] + apply_transform(raw[skip:], decision["kind"],
-                                                decision["key"])
-        else:
-            data = raw
-            obf = None
-        obf_candidates = cands
-    else:
-        data = raw
+            obf = dict(decision, source="auto-detected")
+            body = apply_transform(raw[skip:], obf["kind"], obf["key"])
+            return raw, raw[:skip] + body, skip, obf
+
+    return raw, raw, skip, None
+
+
+def scan(path, min_len=4, show_all_strings=False, context="internal",
+         auto_decode=True, spec=None, show_plaintext=False):
+    raw, data, skip, obf = load_decoded(path, spec, auto_decode)
 
     strings = extract_strings(data, min_len)
     kv = extract_kv(strings)
@@ -1384,6 +1384,8 @@ def scan(path, min_len=4, show_all_strings=False, context="internal",
             )
     report["credential_candidates"] = secrets
 
+    if show_plaintext:
+        report["plaintext"] = plaintext_lines(data, skip)
     report["key_value_pairs"] = kv if show_all_strings else kv[:200]
     if show_all_strings:
         report["strings"] = [
@@ -1424,6 +1426,7 @@ def render(report):
         a("                     recovered property names: %s"
           % ", ".join(obf["keywords_recovered"][:10]))
         a("                     %s" % obf["note"])
+        a("                     full decoded contents: pivscan plaintext <file>")
     a(" Strings / KV pairs: %d / %d" % (report["string_count"], report["kv_count"]))
     a(
         " Integrity field   : %s"
@@ -1484,6 +1487,18 @@ def render(report):
                     a("      -> %-10s %s" % (d["scheme"], d["plaintext"]))
             else:
                 a("      -> no trivial reversal; use the known-plaintext diff method")
+        a("")
+
+    if report.get("plaintext"):
+        a(BAR)
+        a(" DEOBFUSCATED CONTENTS (offsets address the original file)")
+        a(BAR)
+        for r in report["plaintext"]:
+            for i, line in enumerate(r["text"].splitlines() or [""]):
+                if i == 0:
+                    a("  %08x  [%-8s] %s" % (r["offset"], r["encoding"], line))
+                else:
+                    a("  %8s  %10s %s" % ("", "", line))
         a("")
 
     if report["embedded_blobs"]:
@@ -1680,6 +1695,65 @@ def carve(path, outdir):
 # ---------------------------------------------------------------------------
 
 
+def plaintext_lines(data, skip=0):
+    """The decoded file as readable lines: [(offset, encoding, text)].
+
+    Adjacent UTF-16LE runs separated only by structure bytes are kept as
+    separate entries rather than glued together -- in a PIV those boundaries
+    are the field boundaries, and losing them loses the structure.
+    """
+    out = []
+    if skip:
+        out.append((0, "magic", data[:skip].decode("ascii", "replace")))
+    for off, enc, text in extract_strings(data, 4):
+        if off < skip:
+            continue
+        out.append((off, enc, text))
+    return [{"offset": o, "encoding": e, "text": t} for o, e, t in out]
+
+
+def render_plaintext(path, spec=None, auto_decode=True, as_hex=False, width=16):
+    raw, data, skip, obf = load_decoded(path, spec, auto_decode)
+    L = []
+    a = L.append
+    a(BAR)
+    a(" pivscan plaintext - deobfuscated contents of %s" % os.path.basename(path))
+    a(BAR)
+    if obf:
+        a(" Transform : %s (%s)" % (obf["transform"], obf["source"]))
+        a(" Magic     : %r (plaintext in the original)"
+          % data[:skip].decode("ascii", "replace"))
+        a(" Note      : offsets below address the ORIGINAL file; a byte-wise")
+        a("             transform does not move anything.")
+    else:
+        a(" Transform : none applied - this is the file as it sits on disk.")
+        a("             If it should have been decoded, try: pivscan decode %s"
+          % os.path.basename(path))
+    a("")
+
+    if as_hex:
+        a(" Decoded hexdump (ASCII column shows UTF-16 text as every other byte):")
+        a("")
+        for off in range(0, len(data), width):
+            chunk = data[off:off + width]
+            a("  %08x  %-*s  |%s|" % (
+                off, width * 3, " ".join("%02x" % c for c in chunk),
+                "".join(chr(c) if c in PRINTABLE else "." for c in chunk)))
+    else:
+        rows = plaintext_lines(data, skip)
+        a(" %d text run%s recovered:" % (len(rows), "" if len(rows) == 1 else "s"))
+        a("")
+        for r in rows:
+            for i, line in enumerate(r["text"].splitlines() or [""]):
+                if i == 0:
+                    a("  %08x  [%-8s] %s" % (r["offset"], r["encoding"], line))
+                else:
+                    a("  %8s  %10s %s" % ("", "", line))
+    a("")
+    a(BAR)
+    return "\n".join(L)
+
+
 def decode_report(path, spec=None, out=None, top=5):
     raw = read_file(path)
     skip = header_skip(raw)
@@ -1759,6 +1833,8 @@ def main():
     s.add_argument("--spec",
                    help="apply a known transform instead of detecting one, "
                         "e.g. xor:3b, xor:3b2f, add:05")
+    s.add_argument("--show-plaintext", action="store_true",
+                   help="append the full deobfuscated contents to the report")
 
     st = sub.add_parser("strings", help="dump ASCII + UTF-16LE strings with offsets")
     st.add_argument("file")
@@ -1774,6 +1850,15 @@ def main():
     dc.add_argument("--out", help="write the decoded bytes here")
     dc.add_argument("--top", type=int, default=5, help="candidates to list")
 
+    pt = sub.add_parser("plaintext",
+                        help="print the whole file deobfuscated and readable")
+    pt.add_argument("file")
+    pt.add_argument("--spec", help="apply this transform instead of detecting one")
+    pt.add_argument("--no-auto-decode", action="store_true")
+    pt.add_argument("--hex", action="store_true",
+                    help="annotated hexdump of the decoded bytes")
+    pt.add_argument("--out", help="write the rendered text here")
+
     c = sub.add_parser("carve", help="extract embedded blobs and high-entropy regions")
     c.add_argument("file")
     c.add_argument("--out", default="./carved")
@@ -1782,12 +1867,24 @@ def main():
 
     if args.cmd == "scan":
         rep = scan(args.file, args.min_len, args.all_strings, args.context,
-                   auto_decode=not args.no_auto_decode, spec=args.spec)
+                   auto_decode=not args.no_auto_decode, spec=args.spec,
+                   show_plaintext=args.show_plaintext)
         print(render(rep))
         if args.json_out:
             with open(args.json_out, "w") as fh:
                 json.dump(rep, fh, indent=2)
             print("\nJSON written to %s" % args.json_out)
+
+    elif args.cmd == "plaintext":
+        text = render_plaintext(args.file, args.spec,
+                                auto_decode=not args.no_auto_decode,
+                                as_hex=args.hex)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+            print("Wrote %s" % args.out)
+        else:
+            print(text)
 
     elif args.cmd == "decode":
         print(decode_report(args.file, args.spec, args.out, args.top))

@@ -85,6 +85,33 @@ XOR-ing UTF-16LE with any byte in the printable range leaves the ciphertext
 fully printable, so the raw file already scores well on text volume and a ratio
 test rejects the correct answer.
 
+### Seeing the whole file
+
+`plaintext` prints the entire deobfuscated file, field by field, with offsets
+that still address the original:
+
+```
+ Transform : xor:3b (auto-detected)
+ Magic     : 'PRO4VS' (plaintext in the original)
+
+  00000000  [magic   ] PRO4VS
+  00000006  [utf-16le] CustomToolBar
+  00000044  [utf-16le] HostName=proiv-app03.corp.internal
+  0000009a  [utf-16le] SessionType=Telnet
+  000000ee  [utf-16le] ProivPassword=...
+  00000122  [utf-16le] RememberUsernameAndPassword=1
+  0000015e  [utf-16le] PromptForSecurity=0
+  00000186  [utf-16le] ActivateUserRuntimeInterface=1
+  000001c4  [utf-16le] ApplicationDefinitions=\\fileserver02\proiv$\appdef.ini
+```
+
+Adjacent runs are kept separate rather than glued together — in a PIV those
+boundaries are the field boundaries, and a string-level view has no other
+structure to offer. `--hex` gives an annotated hexdump of the decoded bytes
+instead, with the UTF-16 text visible as every other byte in the ASCII column.
+`scan --show-plaintext` appends the same listing to the end of a normal report,
+which is what you want when the dump is going into an appendix.
+
 Use `decode` when `scan` declines. It has no keyword gate, ranks every
 candidate, explains how the key was recovered, and will write the decoded bytes
 out with `--out` for your own `strings`/hex work:
@@ -107,6 +134,8 @@ python3 pivscan.py scan    session.piv --context raw     # no severity calibrati
 python3 pivscan.py scan    session.piv --spec xor:3b     # apply a known transform
 python3 pivscan.py scan    session.piv --no-auto-decode  # scan the raw bytes
 python3 pivscan.py decode  session.piv [--out plain.bin] [--spec xor:3b] [--top 5]
+python3 pivscan.py plaintext session.piv [--hex] [--spec xor:3b] [--out dump.txt]
+python3 pivscan.py scan    session.piv --show-plaintext
 python3 pivscan.py strings session.piv [--min-len 4]
 python3 pivscan.py diff    before.piv after.piv
 python3 pivscan.py carve   session.piv --out ./carved
@@ -139,6 +168,99 @@ then `AAAAAAAB`, and read the diff:
 
 **3. `carve`** — extract PEM blocks, archives and high-entropy regions for
 separate review. Use this on binary PIVs where the string scan comes up empty.
+
+## Can the vendor fix this? Not by encrypting the file
+
+Worth settling before you write the recommendation, because the obvious advice
+("encrypt it properly") is wrong.
+
+**No file format can be made non-recoverable while the client decrypts it
+unattended.** If the PROIV Client opens a PIV on double-click with no secret
+from the user, then every input the decryption needs is already on the
+workstation — so anyone holding the client holds the key. Replacing XOR `0x3b`
+with AES-256 changes the work from "one byte" to "find the key in the binary",
+which is a speed bump, not a control. This is Kerckhoffs's principle, and it is
+why the finding's recommendation has to be *remove the secret*, not *strengthen
+the cipher*.
+
+### The setting that sounds like the fix, and is not
+
+PROIV's **Service Encryption** option decides "whether the service will be
+encrypted (PIV version 501) or unencrypted (PIV version 500)"
+([PROIV Service Settings](https://support.proiv.com/V8_Help/clientadministration/proiv_service_settings.htm)).
+That is **transport** encryption for the service connection. It does nothing to
+protect the contents of the PIV file at rest. Expect to have to say this
+explicitly: a client who has ticked Service Encryption may believe the session
+file is covered, and a `plaintext` dump of a version 501 PIV is the fastest way
+to show that it is not.
+
+Equally, PROIV's own wording for session password protection is that "the
+password is encrypted and stored in the PIV"
+([General Properties](https://support.proiv.com/V8_Help/openclientadmin/proiv_client_and_open_client_-_general_properties.htm)).
+Vendor documentation saying "encrypted and stored" is the pattern `PIV-CRYPT-012`
+exists to flag — it is a statement about storage, not about who can reverse it.
+
+### What actually fixes it, in order of effect
+
+1. **Store no credential.** Enable **Prompt for Security**, which makes the
+   client "prompt the user for user name and password at connection", and
+   disable **Remember Username and Password**
+   ([Session Connection Settings](https://support.proiv.com/V13_Help/desktop/windowsclient/session_connection_settings.htm)).
+   Then the obfuscation is irrelevant because there is nothing in the file to
+   recover. This is the only remediation that removes the finding rather than
+   raising its cost. Enforce it centrally — PROIV's *Remove Remember Password
+   Checkbox* setting stops a user re-enabling it.
+2. **Keep credential-bearing PIVs out of distribution entirely.** PROIV reads
+   session values "first from the PIV file, if no PIV file has yet been loaded,
+   the values are read from the current users registry hive"
+   ([Session Properties](https://support.proiv.com/V8_Help/windowsclient/session_properties.htm)).
+   So sessions can be provisioned per user without shipping a file that travels
+   with the roaming profile, the backup and the helpdesk ticket. The registry is
+   not encrypted either — the gain is per-user ACLs and a much smaller blast
+   radius, not secrecy.
+3. **Move to key-based authentication.** The Open Client supports SSH with
+   either password or key authentication, where key mode takes a private key
+   file path plus an optional passphrase, and supports strict host key checking
+   against `known_hosts`
+   ([Open Client SSH Connections](https://support.proiv.com/V14_Help/desktop/client_services/open_client_ssh_connections.htm)).
+   A passphrase-protected key is not a reusable password, strict host key
+   checking blunts the redirection finding, and it replaces the Telnet
+   session type that leaks the credential on every launch.
+4. **Bind any stored secret to the user and machine.** If credentials must
+   persist for unattended launch, the protection has to use a key the attacker
+   does not get by copying the file: DPAPI at user scope with an application
+   entropy value, or a hardware-backed store. Copying the PIV to another
+   account or machine then yields nothing. PROIV does not appear to offer this,
+   so it is a vendor change request rather than a configuration change — worth
+   raising as one.
+5. **Sign the file.** This does not stop decryption and is not a fix for the
+   credential finding, but it is the fix for `PIV-TAMPER-007`: without a
+   signature or MAC that the client enforces, an attacker-supplied `.piv`
+   controls where the client connects. Pin permitted endpoints somewhere the
+   user cannot write (HKLM policy) and validate before connecting.
+
+### What to write in the report
+
+Treat the obfuscation as an **aggravating detail of the stored-credential
+finding, not a finding of its own**. "The password is XOR-obfuscated with a
+single byte and recovered in milliseconds" is the sentence that makes the
+severity stick; "they should use stronger encryption" is a recommendation that
+cannot be implemented correctly and invites a fix that changes nothing. The
+recoverability is not a weakness of their cipher choice — it is inherent to
+storing a secret that the client must use on its own.
+
+### Research limits
+
+The citations above are from PROIV's own help site, reached through search
+result extracts; direct access to `support.proiv.com` was blocked from the
+environment this was written in, so the pages were not read in full. The
+mapping of 501/500 to service encryption, the "encrypted and stored in the PIV"
+wording, the PIV-then-registry precedence and the SSH authentication modes are
+all quoted from those extracts. **No PROIV documentation was found that
+describes the PIV file's own obfuscation scheme** — unsurprising, since the
+format is proprietary, and consistent with it being obfuscation rather than
+documented cryptography. Verify against the version of the client you are
+testing before quoting any of it to a client.
 
 ## Rules
 
@@ -253,7 +375,7 @@ across releases. Confirm against the client you are actually testing.
 ## Tests
 
 ```bash
-python3 -m unittest test_pivscan        # 98 tests
+python3 -m unittest test_pivscan        # 108 tests
 ```
 
 Fixtures are generated at run time by `tests/make_fixtures.py` — nothing

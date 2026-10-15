@@ -36,8 +36,9 @@ python3 salesforce/apex-scan/apex_scan.py --input ./apex_dump --out ./results \
 #     -> browser-extensions/dom-param-finder/
 
 # PROIV Client session file:
-python3 proiv/pivscan/pivscan.py decode session.piv          # recover the obfuscation
-python3 proiv/pivscan/pivscan.py scan   session.piv --json piv.json
+python3 proiv/pivscan/pivscan.py decode    session.piv       # recover the obfuscation
+python3 proiv/pivscan/pivscan.py plaintext session.piv       # whole file, readable
+python3 proiv/pivscan/pivscan.py scan      session.piv --json piv.json
 
 # ServiceNow instance (authorised targets only):
 python3 servicenow/snowpick/snowpick.py --target devNNNNN.service-now.com \
@@ -52,7 +53,7 @@ of it in an engagement:
 ```bash
 cd salesforce/apex-scan  && python3 -m unittest test_apex_scan   && cd -   # 80 tests
 cd servicenow/snowpick   && python3 -m unittest test_snowpick     && cd -   # 111 tests
-cd proiv/pivscan         && python3 -m unittest test_pivscan      && cd -   # 98 tests
+cd proiv/pivscan         && python3 -m unittest test_pivscan      && cd -   # 108 tests
 bash .claude/skills/js-recon/tests/smoke_test.sh                            # 58 assertions
 bash servicenow/snowpick/tests/run_integration.sh                           # TLS mock, no real target
 python3 copilot-vapt/sync_scripts.py --check                                # copy-drift guard
