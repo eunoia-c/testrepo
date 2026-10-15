@@ -29,7 +29,7 @@ target.
 
 ## Layout
 
-One top-level folder per target technology (`pega/`, `salesforce/`,
+One top-level folder per target technology (`pega/`, `proiv/`, `salesforce/`,
 `servicenow/`, `browser-extensions/`, `burp-extensions/`), plus `copilot-vapt/`
 for the editor-assistant packaging and `.claude/skills/` for skills. The
 top-level `README.md` is the index.

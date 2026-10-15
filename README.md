@@ -15,6 +15,7 @@ the top level.
 | [`burp-extensions/`](burp-extensions/) | Jython extensions for Burp Suite | any web app |
 | [`salesforce/apex-scan/`](salesforce/apex-scan/) | Apex static analysis: SOQL injection taint checker, secrets, sharing/CRUD-FLS, crypto, callouts | Salesforce |
 | [`servicenow/snowpick/`](servicenow/snowpick/) | ServiceNow exposure scanner — Python port of BishopFox/snowpick | ServiceNow |
+| [`proiv/pivscan/`](proiv/pivscan/) | PROIV Client `.PIV` session-file scanner: stored credentials, cleartext transport, client-side lockdown, UNC paths, plus a known-plaintext diff workflow for mapping the binary format | PROIV |
 | [`pega/`](pega/) | Pega Infinity content-discovery wordlist and notes | Pega |
 
 ## Quick start
@@ -34,6 +35,9 @@ python3 salesforce/apex-scan/apex_scan.py --input ./apex_dump --out ./results \
 #   chrome://extensions -> Developer mode -> Load unpacked
 #     -> browser-extensions/dom-param-finder/
 
+# PROIV Client session file:
+python3 proiv/pivscan/pivscan.py scan session.piv --json piv.json
+
 # ServiceNow instance (authorised targets only):
 python3 servicenow/snowpick/snowpick.py --target devNNNNN.service-now.com \
     --rate 500ms --fingerprint --table-api
@@ -47,6 +51,7 @@ of it in an engagement:
 ```bash
 cd salesforce/apex-scan  && python3 -m unittest test_apex_scan   && cd -   # 80 tests
 cd servicenow/snowpick   && python3 -m unittest test_snowpick     && cd -   # 111 tests
+cd proiv/pivscan         && python3 -m unittest test_pivscan      && cd -   # 69 tests
 bash .claude/skills/js-recon/tests/smoke_test.sh                            # 58 assertions
 bash servicenow/snowpick/tests/run_integration.sh                           # TLS mock, no real target
 python3 copilot-vapt/sync_scripts.py --check                                # copy-drift guard
