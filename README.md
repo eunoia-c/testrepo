@@ -53,7 +53,7 @@ of it in an engagement:
 ```bash
 cd salesforce/apex-scan  && python3 -m unittest test_apex_scan   && cd -   # 80 tests
 cd servicenow/snowpick   && python3 -m unittest test_snowpick     && cd -   # 111 tests
-cd proiv/pivscan         && python3 -m unittest test_pivscan      && cd -   # 116 tests
+cd proiv/pivscan         && python3 -m unittest test_pivscan      && cd -   # 122 tests
 bash .claude/skills/js-recon/tests/smoke_test.sh                            # 58 assertions
 bash servicenow/snowpick/tests/run_integration.sh                           # TLS mock, no real target
 python3 copilot-vapt/sync_scripts.py --check                                # copy-drift guard

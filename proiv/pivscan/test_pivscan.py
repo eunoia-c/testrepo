@@ -196,9 +196,48 @@ class TestTunnelArchitecture(FixtureCase):
         self.assertIn("PrivateKeyFile=", plain)
         self.assertIn("Passphrase=", plain)
 
+    def test_socks_recommendation_names_the_server_side_control(self):
+        f = next(x for x in self.rep["findings"] if x["id"] == "PIV-NET-019")
+        low = f["recommendation"].lower()
+        self.assertIn("allowtcpforwarding", low)
+        self.assertIn("permitopen", low)
+        self.assertIn("-l ", low)
+
     def test_strict_host_key_checking_off_is_visible(self):
         self.assertIn("StrictHostKeyChecking=0",
                       pivscan.render_plaintext(self.fx("ssh_tunnel.piv")))
+
+    def test_dynamic_socks_forwarding_detected(self):
+        self.assertIn("PIV-NET-019", self.ids)
+
+    def test_socks_finding_is_not_downgraded(self):
+        # An internal position is what makes a pivot useful, not what blunts it.
+        f = next(x for x in self.rep["findings"] if x["id"] == "PIV-NET-019")
+        self.assertEqual(f["severity"], "CRITICAL")
+        self.assertFalse(f["adjusted"])
+
+    def test_socks_impact_distinguishes_D_from_L(self):
+        f = next(x for x in self.rep["findings"] if x["id"] == "PIV-NET-019")
+        self.assertIn("-D", f["impact"])
+        self.assertIn("-L", f["impact"])
+        self.assertIn("unauthenticated", f["impact"].lower())
+
+    def test_socks_rule_matches_the_bare_flag(self):
+        rx = next(x for r, x in pivscan.COMPILED if r["id"] == "PIV-NET-019")
+        for hit in ("-D 1080", "socks5", "DynamicForward 1080", "ProxyPort=1080"):
+            self.assertTrue(rx.search(hit), hit)
+        # -D must not match inside ordinary words, or every PIV gets the finding.
+        for miss in ("MODE-DEBUG", "x-Dy", "DEBUG", "nothing here"):
+            self.assertFalse(rx.search(miss), miss)
+
+    def test_failed_ssh_login_does_not_clear_the_credential_finding(self):
+        # "permission denied" has several innocent-looking explanations and none
+        # of them mean the exposed credential is harmless.
+        f = next(x for x in self.rep["findings"] if x["id"] == "PIV-CRED-018")
+        low = f["verify"].lower()
+        self.assertIn("permission denied", low)
+        self.assertIn("key only", low)
+        self.assertIn("unresolved, not disproven", low)
 
     def test_recommendation_names_the_real_controls(self):
         net = next(f for f in self.rep["findings"] if f["id"] == "PIV-NET-017")

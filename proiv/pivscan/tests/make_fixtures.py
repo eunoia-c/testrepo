@@ -140,7 +140,8 @@ def ssh_tunnel_piv():
         "PrivateKeyFile=C:\\PROIV\\keys\\id_rsa\r\n"
         "Passphrase=" + PLAIN_PW + "\r\n"
         "StrictHostKeyChecking=0\r\n"
-        "LocalForward=127.0.0.1:12023\r\n"
+        "SshArgs=-D 1080 -N\r\n"
+        "ProxyPort=1080\r\n"
         "Port=12023\r\n"
     ).encode("ascii")
 

@@ -1234,10 +1234,70 @@ RULES = [
             "something unrelated); and is the account shared across users rather than "
             "per person. A restricted no-shell account with permitopen scoped to the "
             "application port is a far smaller finding than a general-purpose login, "
-            "and the difference is worth establishing before scoring it."
+            "and the difference is worth establishing before scoring it. "
+            "A 'permission denied' from your own SSH client does not settle it and is "
+            "not evidence the credential is safe -- it is equally explained by the "
+            "server disallowing password authentication (key only), by the account "
+            "being restricted to a source address or a forced command, by the client "
+            "sending something additional such as a key or a specific KEX or cipher, "
+            "or by the field holding an application credential rather than an SSH one. "
+            "Confirm which, by reading the server's sshd_config or auth log with the "
+            "client's cooperation, or by watching your own attempt with ssh -vvv and "
+            "comparing the offered authentication methods against what the client "
+            "does. Report the credential as exposed either way: what it unlocks is "
+            "unresolved, not disproven."
         ),
         "refs": ["CWE-522", "CWE-798", "CWE-306", "MITRE ATT&CK T1021.004",
                  "MITRE ATT&CK T1572"],
+    },
+    {
+        "id": "PIV-NET-019",
+        "recommendation": (
+            "Replace dynamic forwarding with a local forward to the single host and "
+            "port the session actually needs (-L 127.0.0.1:port:apphost:appport, never "
+            "-D), and bind it to the loopback address explicitly. Constrain it "
+            "server-side too, so a client cannot widen it: set AllowTcpForwarding to "
+            "local, or no, and scope permitopen to the application endpoint on the "
+            "account the client authenticates as. Where several users share a "
+            "workstation, a per-user listener on a per-user port stops one session "
+            "borrowing another's tunnel."
+        ),
+        "cvss_hint": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+        "internal_adjust": 0,
+        "context_note": (
+            "Do NOT downgrade for internal context -- an internal position is what "
+            "makes this useful. The proxy's reach is whatever the SSH server can route "
+            "to, so severity is set by the server's network position, not the tester's. "
+            "Note also that this needs no credential: the tunnel is stood up by the "
+            "legitimate client, so a recovered SSH password that does not work is "
+            "irrelevant to exploiting it."
+        ),
+        "title": "Dynamic (SOCKS) port forwarding: unauthenticated internal pivot",
+        "severity": "CRITICAL",
+        "pattern": r"(\b(socks|socks4|socks5|dynamic[_ ]?forward|dynamicforward|proxyport|proxy[_ ]?port)\b|(?<![\w-])-D(?![\w-]))",
+        "impact": (
+            "SSH's -D option is dynamic forwarding: the client becomes a SOCKS4/5 "
+            "proxy, and anything that speaks to it reaches ANY host and port the SSH "
+            "server can route to -- not just the application server. That is a "
+            "general-purpose route into the internal network sitting on the "
+            "workstation, and it is unauthenticated: the SOCKS listener does not ask "
+            "for the SSH credential, because the session is already established by the "
+            "legitimate client. Any local process, any other user on a shared host, "
+            "and any malware running as that user inherits the reach of the service "
+            "account's host. A local forward (-L) to one endpoint has none of this "
+            "breadth, which is why the distinction matters more than it looks."
+        ),
+        "verify": (
+            "Read the running command line to confirm the flag and the bind address "
+            "(wmic process get commandline, or Get-CimInstance Win32_Process), then "
+            "check the listener with netstat -ano. Point a SOCKS-aware client at the "
+            "port and connect to an internal host that has nothing to do with PROIV: "
+            "if that succeeds, the finding is a network pivot rather than an "
+            "application issue. A listener on 0.0.0.0 rather than 127.0.0.1 makes the "
+            "proxy reachable from the network and should be reported separately."
+        ),
+        "refs": ["CWE-306", "CWE-923", "CWE-441", "MITRE ATT&CK T1572",
+                 "MITRE ATT&CK T1090.001"],
     },
     {
         "id": "PIV-MISC-016",

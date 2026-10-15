@@ -187,6 +187,16 @@ application server and — unless forwarding is restricted — the ability to
 forward arbitrary ports to anything that server can reach. The application
 login does not contain any of that, so it is not a mitigation.
 
+**A failed login does not clear this finding.** `permission denied` when you
+try the credential yourself is equally explained by the server disallowing
+password authentication (key only), the account being restricted to a source
+address or a forced command, the client offering something extra such as a key,
+or the field holding an application credential rather than an SSH one. None of
+those make an exposed credential safe; they mean what it unlocks is
+*unresolved*, not disproven. Settle it with `ssh -vvv` and compare the offered
+authentication methods against what the client does, or read `sshd_config` and
+the auth log with the client's cooperation.
+
 Three questions set the severity, and they are worth answering before scoring
 it (`PIV-CRED-018` prints them):
 
@@ -241,6 +251,47 @@ it sits near informational. On a multi-user host — Citrix or RDS, which is
 where thick clients like this usually live — the plaintext is exposed to every
 other session's administrator and to anything running locally, and the
 credentials of every user on that host cross it.
+
+### `-D` is not a local forward, and that is the whole finding
+
+Check the running command line before anything else:
+
+```
+wmic process get commandline
+powershell -c "Get-CimInstance Win32_Process | ? {$_.Name -like '*ssh*'} | % CommandLine"
+```
+
+If the helper launches SSH with **`-D <port>`**, that is **dynamic
+forwarding**: the client becomes a SOCKS4/5 proxy, and anything speaking to it
+reaches **any host and port the SSH server can route to** — not only the
+application server. `-L` forwards one endpoint; `-D` forwards the network. The
+difference matters far more than one character suggests.
+
+Three consequences:
+
+- **It needs no credential.** The SSH session is stood up by the legitimate
+  client, and the SOCKS listener does not re-authenticate. So a recovered SSH
+  password that *fails* when you try it yourself is irrelevant to exploiting
+  this — the working tunnel is the access.
+- **Its reach is the server's reach**, so severity is set by the SSH server's
+  network position, not the tester's.
+- **Any local process inherits it**: other users on a shared host, anything
+  running as that user, any malware.
+
+Prove it by pointing a SOCKS-aware client at the port and connecting to an
+internal host that has nothing to do with PROIV. If that works, this is a
+network pivot finding, not an application one.
+
+The server-side fix is the one to recommend, because it cannot be undone by a
+client: `AllowTcpForwarding local` (or `no`) with `permitopen` scoped to the
+application endpoint, on the account the client authenticates as. Client-side,
+a local forward to the single host and port the session needs replaces `-D`
+entirely.
+
+**SSL does not fix this.** Encrypting the application protocol stops the
+sniffing; it does nothing about an open proxy, because the proxy forwards
+whatever it is handed. Two separate findings with two separate fixes — worth
+stating plainly, or a client will enable SSL and consider the matter closed.
 
 ### The stronger finding on that host
 
@@ -357,7 +408,7 @@ testing before quoting any of it to a client.
 
 ## Rules
 
-18 rules, keyword- and structure-driven rather than offset-driven so they work
+19 rules, keyword- and structure-driven rather than offset-driven so they work
 on both the INI-ish text variants and the binary ones.
 
 | ID | Finding | Base severity |
@@ -379,6 +430,7 @@ on both the INI-ish text variants and the binary ones.
 | `PIV-UI-015` | Client-side-only restriction flag | MEDIUM |
 | `PIV-NET-017` | Transport encryption not enabled on the client connection | HIGH |
 | `PIV-CRED-018` | SSH credentials in session file (OS access, not application access) | CRITICAL |
+| `PIV-NET-019` | Dynamic (SOCKS) port forwarding: unauthenticated internal pivot | CRITICAL |
 | `PIV-MISC-016` | Proxy / connector service credentials | HIGH |
 
 Every finding prints why it matters, how to verify it yourself, a
@@ -412,6 +464,8 @@ Rules marked `internal_adjust: 0` deliberately do **not** downgrade:
   that follows the tunnel authenticates something else and does not contain it.
 - **`PIV-NET-017`** — an SSH tunnel protects one hop, not the client-to-
   forwarder hop on the workstation.
+- **`PIV-NET-019`** — an internal position is what makes a SOCKS pivot useful,
+  not what blunts it.
 
 Use `--context raw` when you want the uncalibrated base severities.
 
@@ -474,7 +528,7 @@ across releases. Confirm against the client you are actually testing.
 ## Tests
 
 ```bash
-python3 -m unittest test_pivscan        # 116 tests
+python3 -m unittest test_pivscan        # 122 tests
 ```
 
 Fixtures are generated at run time by `tests/make_fixtures.py` — nothing
@@ -486,7 +540,7 @@ pair differing by one known character, and an opaque PIV with nothing in it
 
 Fixtures also include an SSH-tunnel session (SSH credentials, a private key
 path with its passphrase beside it, strict host key checking off, no transport
-encryption) and an obfuscated PIV (`PRO4VS` magic + XOR `0x3b` over
+encryption, and `-D` dynamic forwarding) and an obfuscated PIV (`PRO4VS` magic + XOR `0x3b` over
 UTF-16LE) and one under a repeating two-byte key, which is the case single-byte
 recovery alone cannot solve.
 
